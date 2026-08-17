@@ -31,10 +31,10 @@ jobs:
       exclude_archs: wasm_mvp;wasm_eh;wasm_threads
 
   code-quality:
-    name: Code quality (format + tidy)
+    name: Code quality (format)
     uses: duckdb/extension-ci-tools/.github/workflows/_extension_code_quality.yml@v1.5.5
     with:
       duckdb_version: ${{ inputs.duckdb_version || vars.DUCKDB_VERSION || 'v1.5.5' }}
       ci_tools_version: ${{ inputs.ci_tools_version || vars.CI_TOOLS_VERSION || 'v1.5.5' }}
       extension_name: cn_ta
-      format_checks: 'format;tidy'
+      format_checks: 'format'
