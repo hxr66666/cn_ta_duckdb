@@ -29,30 +29,30 @@ void RegisterCnTaTsAggFunctions(ExtensionLoader &loader);
 void RegisterCnTaIndicatorsFunction(ExtensionLoader &loader);
 
 static void LoadInternal(ExtensionLoader &loader) {
-    RegisterCnTaScalarFunctions(loader);
-    RegisterCnTaAggregateFunctions(loader);
-    RegisterCnTaMultiOutputFunctions(loader);
-    RegisterCnTaMultiOutputAggFunctions(loader);
-    RegisterCnTaStatFunctions(loader);
-    RegisterCnTaStatAggFunctions(loader);
-    RegisterCnTaAshareFunctions(loader);
-    RegisterCnTaTsAggFunctions(loader);
-    RegisterCnTaIndicatorsFunction(loader);
+	RegisterCnTaScalarFunctions(loader);
+	RegisterCnTaAggregateFunctions(loader);
+	RegisterCnTaMultiOutputFunctions(loader);
+	RegisterCnTaMultiOutputAggFunctions(loader);
+	RegisterCnTaStatFunctions(loader);
+	RegisterCnTaStatAggFunctions(loader);
+	RegisterCnTaAshareFunctions(loader);
+	RegisterCnTaTsAggFunctions(loader);
+	RegisterCnTaIndicatorsFunction(loader);
 }
 
 void CnTaExtension::Load(ExtensionLoader &loader) {
-    LoadInternal(loader);
+	LoadInternal(loader);
 }
 
 std::string CnTaExtension::Name() {
-    return "cn_ta";
+	return "cn_ta";
 }
 
 std::string CnTaExtension::Version() const {
 #ifdef EXT_VERSION_CN_TA
-    return EXT_VERSION_CN_TA;
+	return EXT_VERSION_CN_TA;
 #else
-    return "";
+	return "";
 #endif
 }
 
@@ -61,9 +61,8 @@ std::string CnTaExtension::Version() const {
 extern "C" {
 
 DUCKDB_CPP_EXTENSION_ENTRY(cn_ta, loader) {
-    duckdb::LoadInternal(loader);
+	duckdb::LoadInternal(loader);
 }
-
 }
 
 #ifndef DUCKDB_EXTENSION_MAIN
