@@ -1,6 +1,6 @@
 # name: test/sql/test_ashare.test
 # description: Test A-Share specific adapter functions (cn_*)
-# group: [cn_ta]
+# group: [sql]
 
 require cn_ta
 

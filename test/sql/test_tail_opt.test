@@ -1,6 +1,6 @@
 # name: test/sql/test_tail_opt.test
 # description: Test tail-truncation & bounded-buffer optimization for local-window functions
-# group: [cn_ta]
+# group: [sql]
 
 require cn_ta
 

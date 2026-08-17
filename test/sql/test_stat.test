@@ -1,6 +1,6 @@
 # name: test/sql/test_stat.test
 # description: Test Eigen-backed financial statistics & regression functions
-# group: [cn_ta]
+# group: [sql]
 
 require cn_ta
 

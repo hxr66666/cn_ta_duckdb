@@ -1,6 +1,6 @@
 # name: test/sql/test_partition.test
 # description: Test that window functions compute independently per partition
-# group: [cn_ta]
+# group: [sql]
 
 require cn_ta
 

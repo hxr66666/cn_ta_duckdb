@@ -1,6 +1,6 @@
 # name: test/sql/test_smoke.test
 # description: Smoke tests for TA-Lib scalar functions
-# group: [cn_ta]
+# group: [sql]
 
 require cn_ta
 

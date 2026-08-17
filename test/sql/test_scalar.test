@@ -1,6 +1,6 @@
 # name: test/sql/test_scalar.test
 # description: Tests for scalar (ct_) and window (cta_) variants across multiple patterns (P3-P8)
-# group: [cn_ta]
+# group: [sql]
 
 require cn_ta
 
