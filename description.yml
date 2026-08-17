@@ -1,0 +1,27 @@
+extension:
+  name: cn_ta
+  description: "Technical Analysis Library for Chinese A-Share market (cn_ta) -- TA-Lib indicators + Eigen stats + A-Share adapters for DuckDB"
+  version: 0.1.0
+  language: C++
+  build: cmake
+  license: MIT
+  excluded_platforms: "wasm_mvp;wasm_eh;wasm_threads;windows_amd64_rtools;windows_amd64_mingw"
+
+repo:
+  github: cn_ta/cn_ta
+  ref: HEAD
+
+docs:
+  hello_world: |
+    -- Moving averages and RSI on A-Share data
+    SELECT ct_sma([1.0, 2.0, 3.0, 4.0, 5.0], 3);
+  extended_description: |
+    Technical Analysis Library for Chinese A-Share market, built on TA-Lib and Eigen.
+    Includes 100+ TA-Lib technical analysis indicators, Eigen-backed financial statistics
+    and regression, plus A-Share specific adapters (price limit, trading calendar, ST filter).
+
+    Functions are available in multiple modes:
+    - Scalar (ct_* prefix): operate on pre-collected lists
+    - Window/Aggregate (cta_* prefix): use OVER() for row-by-row computation
+    - A-Share adapters (cn_* prefix): price limit, trading calendar, ST filter
+    - Statistics (stat_*): Eigen-backed regression, PCA, GARCH, cointegration

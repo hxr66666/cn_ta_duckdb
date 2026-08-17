@@ -1,0 +1,33 @@
+[project]
+name = "benchmark-cn-ta"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "akshare>=1.18.91",
+    "duckdb==1.5.5",
+    "numpy>=2.4.6",
+    "pandas>=3.0.5",
+    "ta-lib>=0.7.1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[[tool.uv.index]]
+url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/"
+default = true
+
+[tool.uv]
+package = true
+
+[project.scripts]
+ta = "benchmark_cn_ta:main"
+stat = "stat_benchmark:main"
+examples = "examples:main"
+indicators = "indicators_demo:main"
+
+[tool.hatch.build]
+include = ["benchmark_cn_ta.py", "stat_benchmark.py", "examples.py", "indicators_demo.py"]

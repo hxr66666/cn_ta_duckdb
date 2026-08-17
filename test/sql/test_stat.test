@@ -1,0 +1,207 @@
+# name: test/sql/test_stat.test
+# description: Test Eigen-backed financial statistics & regression functions
+# group: [cn_ta]
+
+require cn_ta
+
+# ------------------------------------------------------------------
+# 1. 单变量统计
+# ------------------------------------------------------------------
+# var of [1,2,3,4,5] sample = 2.5
+query T
+SELECT cast(round(stat_var(list_value(1.0,2.0,3.0,4.0,5.0)), 4) AS VARCHAR)
+----
+2.5
+
+# stddev = sqrt(2.5) = 1.5811
+query T
+SELECT cast(round(stat_stddev(list_value(1.0,2.0,3.0,4.0,5.0)), 4) AS VARCHAR)
+----
+1.5811
+
+# ------------------------------------------------------------------
+# 2. 双变量统计: cov/corr/beta
+# ------------------------------------------------------------------
+# cov([1,2,3,4],[2,4,6,8]) = 3.3333
+query T
+SELECT cast(round(stat_cov(list_value(1.0,2.0,3.0,4.0), list_value(2.0,4.0,6.0,8.0)), 4) AS VARCHAR)
+----
+3.3333
+
+# corr 完全线性相关 = 1
+query T
+SELECT cast(round(stat_corr(list_value(1.0,2.0,3.0,4.0), list_value(2.0,4.0,6.0,8.0)), 4) AS VARCHAR)
+----
+1.0
+
+# beta: y = 2x, cov(x,y)/var(x) = 2
+query T
+SELECT cast(round(stat_beta(list_value(2.0,4.0,6.0,8.0), list_value(1.0,2.0,3.0,4.0)), 4) AS VARCHAR)
+----
+2.0
+
+# ------------------------------------------------------------------
+# 3. 风险指标: max_drawdown / sharpe / ewma_vol
+# ------------------------------------------------------------------
+# max drawdown of [100,90,120,80,110]: (120-80)/120 = 0.3333
+query T
+SELECT cast(round(stat_max_drawdown(list_value(100.0,90.0,120.0,80.0,110.0)), 4) AS VARCHAR)
+----
+0.3333
+
+# ------------------------------------------------------------------
+# 4. 单变量回归 stat_regress: y=2x -> slope=2, r2=1, std_err=0
+# ------------------------------------------------------------------
+query T
+SELECT cast(round(stat_regress(list_value(2.0,4.0,6.0,8.0), list_value(1.0,2.0,3.0,4.0)).slope, 4) AS VARCHAR) || ',' ||
+       cast(round(stat_regress(list_value(2.0,4.0,6.0,8.0), list_value(1.0,2.0,3.0,4.0)).r2, 4) AS VARCHAR)
+----
+2.0,1.0
+
+# ------------------------------------------------------------------
+# 5. 多变量 OLS stat_ols: y = 2x1 + 3x2 + 1
+#    x1=[1,2,3,4], x2=[1,4,9,16] (独立), y=[6,17,34,57]
+#    coefficients=[2,3], intercept=1, r2=1
+# ------------------------------------------------------------------
+query T
+SELECT cast(round(stat_ols(list_value(6.0,17.0,34.0,57.0),
+        CAST([[1.0,2.0,3.0,4.0],[1.0,4.0,9.0,16.0]] AS DOUBLE[][])).coefficients[1], 4) AS VARCHAR) || ',' ||
+       cast(round(stat_ols(list_value(6.0,17.0,34.0,57.0),
+        CAST([[1.0,2.0,3.0,4.0],[1.0,4.0,9.0,16.0]] AS DOUBLE[][])).coefficients[2], 4) AS VARCHAR) || ',' ||
+       cast(round(stat_ols(list_value(6.0,17.0,34.0,57.0),
+        CAST([[1.0,2.0,3.0,4.0],[1.0,4.0,9.0,16.0]] AS DOUBLE[][])).intercept, 4) AS VARCHAR)
+----
+2.0,3.0,1.0
+
+# ------------------------------------------------------------------
+# 6. 协方差矩阵 stat_cov_matrix
+#    x1=[1,2,3,4] (var=1.667), x2=[2,4,6,8] (var=6.667, cov=3.333)
+# ------------------------------------------------------------------
+query T
+SELECT cast(round(stat_cov_matrix(CAST([[1.0,2.0,3.0,4.0],[2.0,4.0,6.0,8.0]] AS DOUBLE[][]))[1][1], 4) AS VARCHAR) || ',' ||
+       cast(round(stat_cov_matrix(CAST([[1.0,2.0,3.0,4.0],[2.0,4.0,6.0,8.0]] AS DOUBLE[][]))[1][2], 4) AS VARCHAR) || ',' ||
+       cast(round(stat_cov_matrix(CAST([[1.0,2.0,3.0,4.0],[2.0,4.0,6.0,8.0]] AS DOUBLE[][]))[2][2], 4) AS VARCHAR)
+----
+1.6667,3.3333,6.6667
+
+# ------------------------------------------------------------------
+# 7. PCA stat_pca
+#    完全线性相关数据 -> 最小特征值为 0
+# ------------------------------------------------------------------
+query T
+SELECT cast(round(stat_pca(CAST([[1.0,2.0,3.0,4.0,5.0],[2.0,4.0,6.0,8.0,10.0]] AS DOUBLE[][])).eigenvalues[1], 4) AS VARCHAR)
+----
+0.0
+
+# ------------------------------------------------------------------
+# 8. 扩展风险/收益指标
+# ------------------------------------------------------------------
+# 对称序列偏度 = 0
+query T
+SELECT cast(round(stat_skew(list_value(1.0,2.0,3.0,4.0,5.0)), 4) AS VARCHAR)
+----
+0.0
+
+# 5% 历史 VaR = 最差 5% 分位数
+query T
+SELECT cast(round(stat_var_historical(list_value(-0.05,0.01,0.02,-0.03,0.04), 0.05), 4) AS VARCHAR)
+----
+-0.05
+
+# 最大回撤持续期: [100,90,120,80,110], 峰120后回撤2期到80
+query T
+SELECT cast(round(stat_max_drawdown_duration(list_value(100.0,90.0,120.0,80.0,110.0)), 4) AS VARCHAR)
+----
+2.0
+
+# ------------------------------------------------------------------
+# 9. NULL/异常输入处理
+# ------------------------------------------------------------------
+query T
+SELECT stat_var(list_value(1.0)) IS NULL
+----
+true
+
+# tracking error 为 0 时信息比率返回 NULL（保护除零）
+query T
+SELECT stat_information_ratio(list_value(0.02,0.03,0.01), list_value(0.02,0.03,0.01), 12) IS NULL
+----
+true
+
+# ------------------------------------------------------------------
+# 10. 高级指标
+# ------------------------------------------------------------------
+# GARCH 波动率（价格序列）
+query T
+SELECT stat_garch_vol(list_value(100.0,101.0,99.0,102.0,100.0), 252, 0.1, 0.85) IS NOT NULL
+----
+true
+
+# RSI: 单调上升序列 RSI 应接近 100（无下跌）
+query T
+SELECT cast(round(stat_rsi(list_value(100.0,101.0,102.0,103.0,104.0,105.0), 3), 2) AS VARCHAR)
+----
+100.0
+
+# 趋势强度: 完美线性序列 R² = 1
+query T
+SELECT cast(round(stat_trend_strength(list_value(1.0,2.0,3.0,4.0,5.0)), 4) AS VARCHAR)
+----
+1.0
+
+# ------------------------------------------------------------------
+# 11. 聚合/窗口版本（支持 OVER）
+# ------------------------------------------------------------------
+statement ok
+CREATE TABLE win AS
+SELECT unnest(ARRAY[1.0,2.0,3.0,4.0,5.0]) AS x,
+       unnest(ARRAY[2.0,4.0,6.0,8.0,10.0]) AS y,
+       unnest(ARRAY[1,2,3,4,5]) AS rn;
+
+# stat_avg OVER 滑窗2: [1]->1, [1,2]->1.5, ...
+query T
+SELECT cast(round(stat_avg(x) OVER (ORDER BY rn ROWS BETWEEN 2 PRECEDING AND CURRENT ROW), 2) AS VARCHAR)
+FROM win
+ORDER BY rn;
+----
+1.0
+1.5
+2.0
+3.0
+4.0
+
+# stat_sum OVER 滑窗2
+query T
+SELECT cast(round(stat_sum(x) OVER (ORDER BY rn ROWS BETWEEN 2 PRECEDING AND CURRENT ROW), 2) AS VARCHAR)
+FROM win
+ORDER BY rn;
+----
+1.0
+3.0
+6.0
+9.0
+12.0
+
+# stat_rolling_corr OVER 滑窗2（y=2x，相关=1）
+query T
+SELECT cast(round(stat_rolling_corr(x, y) OVER (ORDER BY rn ROWS BETWEEN 2 PRECEDING AND CURRENT ROW), 4) AS VARCHAR)
+FROM win
+ORDER BY rn;
+----
+NULL
+1.0
+1.0
+1.0
+1.0
+
+# stat_rolling_beta OVER 滑窗2（y=2x，beta=0.5）
+query T
+SELECT cast(round(stat_rolling_beta(x, y) OVER (ORDER BY rn ROWS BETWEEN 2 PRECEDING AND CURRENT ROW), 4) AS VARCHAR)
+FROM win
+ORDER BY rn;
+----
+NULL
+0.5
+0.5
+0.5
+0.5

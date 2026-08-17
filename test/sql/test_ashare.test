@@ -1,0 +1,125 @@
+# name: test/sql/test_ashare.test
+# description: Test A-Share specific adapter functions (cn_*)
+# group: [cn_ta]
+
+require cn_ta
+
+# ------------------------------------------------------------------
+# 1. 涨跌停幅度（按板块）
+# ------------------------------------------------------------------
+# 主板 ±10%
+query T
+SELECT cast(cn_limit_pct('600000', false) AS VARCHAR)
+----
+0.1
+
+# 创业板 ±20%
+query T
+SELECT cast(cn_limit_pct('300750', false) AS VARCHAR)
+----
+0.2
+
+# 科创板 ±20%
+query T
+SELECT cast(cn_limit_pct('688111', false) AS VARCHAR)
+----
+0.2
+
+# 北交所 ±30%
+query T
+SELECT cast(cn_limit_pct('830799', false) AS VARCHAR)
+----
+0.3
+
+# 主板 ST ±5%
+query T
+SELECT cast(cn_limit_pct('600000', true) AS VARCHAR)
+----
+0.05
+
+# 创业板 ST 仍 ±20%
+query T
+SELECT cast(cn_limit_pct('300750', true) AS VARCHAR)
+----
+0.2
+
+# ------------------------------------------------------------------
+# 2. 涨跌停价格
+# ------------------------------------------------------------------
+# 主板 prev_close=10 -> 涨停 11.0, 跌停 9.0
+query T
+SELECT cast(cn_limit_price(10.0, '600000', false).limit_up AS VARCHAR) || ',' ||
+       cast(cn_limit_price(10.0, '600000', false).limit_down AS VARCHAR)
+----
+11.0,9.0
+
+# 创业板 prev_close=20 -> 涨停 24.0, 跌停 16.0
+query T
+SELECT cast(cn_limit_price(20.0, '300750', false).limit_up AS VARCHAR) || ',' ||
+       cast(cn_limit_price(20.0, '300750', false).limit_down AS VARCHAR)
+----
+24.0,16.0
+
+# ------------------------------------------------------------------
+# 3. ST 判断
+# ------------------------------------------------------------------
+query TTT
+SELECT cn_is_st('ST中葡') AS a, cn_is_st('平安银行') AS b, cn_is_st('*ST海润') AS c
+----
+true	false	true
+
+# ------------------------------------------------------------------
+# 4. 涨跌幅 / 换手率
+# ------------------------------------------------------------------
+query T
+SELECT cast(cn_change_pct(10.5, 10.0) AS VARCHAR) || ',' ||
+       cast(cn_turnover(500000, 1000000) AS VARCHAR)
+----
+0.05,0.5
+
+# ------------------------------------------------------------------
+# 5. 交易日判断（排除周末 + 法定节假日）
+# ------------------------------------------------------------------
+query TT
+SELECT cn_trading_day(DATE '2024-01-08') AS monday, cn_trading_day(DATE '2024-01-07') AS sunday
+----
+true	false
+
+# 春节休市
+query T
+SELECT cn_trading_day(DATE '2024-02-12')
+----
+false
+
+# 国庆休市
+query T
+SELECT cn_trading_day(DATE '2024-10-01')
+----
+false
+
+# ------------------------------------------------------------------
+# 6. 量比
+# ------------------------------------------------------------------
+# volume=1000000, 5日均量500000 -> 量比2.0
+query T
+SELECT cast(round(cn_volume_ratio(1000000, list_value(500000.0,600000.0,400000.0,550000.0,450000.0)), 2) AS VARCHAR)
+----
+2.0
+
+# ------------------------------------------------------------------
+# 7. 市盈率分位
+# ------------------------------------------------------------------
+# pe=25, 历史[10,15,20,30,40] -> 3/5=0.6
+query T
+SELECT cast(round(cn_pe_percentile(25.0, list_value(10.0,15.0,20.0,30.0,40.0)), 2) AS VARCHAR)
+----
+0.6
+
+# ------------------------------------------------------------------
+# 8. 除权除息复权
+# ------------------------------------------------------------------
+# close=10, factor=1.2 -> 12.0
+query T
+SELECT cast(cn_adjust_price(10.0, 1.2) AS VARCHAR)
+----
+12.0

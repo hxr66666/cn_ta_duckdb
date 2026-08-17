@@ -1,0 +1,14 @@
+build/
+.idea/
+.vscode/
+*.duckdb
+*.wal
+.cache/
+.worktrees/
+.cache
+.tokensave
+vcpkg_installed
+__pycache__
+.venv
+*.pyc
+.cache

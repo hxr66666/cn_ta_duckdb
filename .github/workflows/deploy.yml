@@ -1,0 +1,108 @@
+name: Deploy Extension Binaries
+
+on:
+  workflow_run:
+    workflows: ["Build & Test (Distribution)"]
+    types: [completed]
+    branches: [v1.5.2, v1.5.3, v1.5.4, v1.5.5]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Build run id to pull artifacts from (required for manual redeploy)"
+        required: true
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: deploy-gh-pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Publish binaries
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    steps:
+      - name: Checkout (for build scripts)
+        uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          run-id: ${{ github.event.inputs.run_id || github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve built DuckDB version from artifacts
+        id: ver
+        run: |
+          ver=""
+          for dir in artifacts/cn_ta-*; do
+            [ -d "$dir" ] || continue
+            b="$(basename "$dir")"          # e.g. cn_ta-v1.5.5-extension-linux_amd64
+            tmp="${b#cn_ta-}"               # v1.5.5-extension-linux_amd64
+            ver="${tmp%%-extension-*}"      # v1.5.5
+            break
+          done
+          if [ -z "$ver" ]; then
+            echo "ERROR: could not derive DuckDB version from artifact names under artifacts/" >&2
+            exit 1
+          fi
+          echo "duckdb_version=$ver" >> "$GITHUB_OUTPUT"
+          echo "Resolved built version: $ver"
+
+      - name: Build gzipped Pages tree (DuckDB custom-repo layout)
+        run: bash scripts/build_pages_site.sh artifacts "${{ steps.ver.outputs.duckdb_version }}" site cn_ta
+
+      - name: Stage GitHub Release assets (raw binaries)
+        run: |
+          mkdir -p release_assets
+          for dir in artifacts/cn_ta-*; do
+            [ -d "$dir" ] || continue
+            arch="${dir##*extension-}"
+            for f in "$dir"/*.duckdb_extension; do
+              [ -f "$f" ] || continue
+              cp "$f" "release_assets/cn_ta-${arch}.duckdb_extension"
+            done
+          done
+          find release_assets -type f | sort
+
+      - name: Publish to gh-pages (preserve other versions)
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./site
+          keep_files: true
+          user_name: 'github-actions[bot]'
+          user_email: 'github-actions[bot]@users.noreply.github.com'
+          commit_message: "deploy: cn_ta binaries for ${{ steps.ver.outputs.duckdb_version }}"
+
+      - name: Create/update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.duckdb_version }}
+          target_commitish: ${{ github.event.workflow_run.head_branch || steps.ver.outputs.duckdb_version }}
+          name: ${{ steps.ver.outputs.duckdb_version }}
+          body: |
+            ## Install (signed — once published to community-extensions)
+
+            ```sql
+            INSTALL cn_ta FROM community;
+            LOAD cn_ta;
+            ```
+
+            ## Install (self-hosted custom repo, unsigned)
+
+            ```sql
+            SET allow_unsigned_extensions = true;
+            INSTALL cn_ta FROM '<your-cn_ta-repo-url>';
+            LOAD cn_ta;
+            ```
+
+            ## Platforms
+            - Linux x86_64 (`linux_amd64`), Linux ARM64 (`linux_arm64`)
+            - macOS x86_64 (`osx_amd64`), macOS ARM64 (`osx_arm64`)
+          files: release_assets/*
+          make_latest: ${{ steps.ver.outputs.duckdb_version == vars.LATEST_DUCKDB_VERSION }}

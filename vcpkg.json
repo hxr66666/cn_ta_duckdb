@@ -1,0 +1,13 @@
+{
+  "name": "cn-ta",
+  "version-string": "0.1.0",
+  "dependencies": [
+    "vcpkg-cmake",
+    "vcpkg-cmake-config",
+    {
+      "name": "talib",
+      "platform": "windows | osx"
+    },
+    "eigen3"
+  ]
+}

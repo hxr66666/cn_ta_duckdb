@@ -1,0 +1,93 @@
+# name: test/sql/test_tail_opt.test
+# description: Test tail-truncation & bounded-buffer optimization for local-window functions
+# group: [cn_ta]
+
+require cn_ta
+
+statement ok
+CREATE TABLE series AS
+SELECT unnest(ARRAY[10.0,20.0,30.0,40.0,50.0,60.0,70.0,80.0,90.0,100.0]) AS price,
+       unnest(ARRAY[1,2,3,4,5,6,7,8,9,10]) AS rn;
+
+# ------------------------------------------------------------------
+# 1. 白名单局部窗口函数 + window >> period（触发环形缓冲截断）
+#    SMA(3) over window=10: 只保留最后 lookback+1=3 个值，结果应正确
+# ------------------------------------------------------------------
+query T
+SELECT rn || '=' || coalesce(round(cta_sma(price, 3) OVER (ORDER BY rn ROWS BETWEEN 9 PRECEDING AND CURRENT ROW), 2)::VARCHAR, 'NULL')
+FROM series
+ORDER BY rn
+LIMIT 3;
+----
+1=NULL
+2=NULL
+3=20.0
+
+# 到 rn=10，SMA(3) 应等于 (80+90+100)/3 = 90
+query T
+SELECT cast(round(cta_sma(price, 3) OVER (ORDER BY rn ROWS BETWEEN 9 PRECEDING AND CURRENT ROW), 2) AS VARCHAR)
+FROM series
+ORDER BY rn
+LIMIT 1 OFFSET 9;
+----
+90.0
+
+# ------------------------------------------------------------------
+# 2. MAX/MIN/SUM（同为白名单，环形缓冲生效）
+# ------------------------------------------------------------------
+query T
+SELECT cast(round(cta_max(price, 3) OVER (ORDER BY rn ROWS BETWEEN 9 PRECEDING AND CURRENT ROW), 2) AS VARCHAR) || ' ' ||
+       cast(round(cta_min(price, 3) OVER (ORDER BY rn ROWS BETWEEN 9 PRECEDING AND CURRENT ROW), 2) AS VARCHAR) || ' ' ||
+       cast(round(cta_sum(price, 3) OVER (ORDER BY rn ROWS BETWEEN 9 PRECEDING AND CURRENT ROW), 2) AS VARCHAR)
+FROM series
+ORDER BY rn
+LIMIT 1 OFFSET 9;
+----
+100.0 80.0 270.0
+
+# ------------------------------------------------------------------
+# 3. ROC（变化率，白名单）：window >> period 时结果与全量一致
+#    rn=10: (100-70)/70*100 = 42.8571
+# ------------------------------------------------------------------
+query T
+SELECT cast(round(cta_roc(price, 3) OVER (ORDER BY rn ROWS BETWEEN 9 PRECEDING AND CURRENT ROW), 4) AS VARCHAR)
+FROM series
+ORDER BY rn
+LIMIT 1 OFFSET 9;
+----
+42.8571
+
+# ------------------------------------------------------------------
+# 4. LINEARREG（线性回归，计算重，白名单）：window >> period 结果应正确
+#    rn=10 的 LINEARREG(3) 基于最后 3 个点 (80,90,100)
+# ------------------------------------------------------------------
+query T
+SELECT cast(round(cta_linearreg(price, 3) OVER (ORDER BY rn ROWS BETWEEN 9 PRECEDING AND CURRENT ROW), 2) AS VARCHAR)
+FROM series
+ORDER BY rn
+LIMIT 1 OFFSET 9;
+----
+100.0
+
+# ------------------------------------------------------------------
+# 5. 非白名单有状态函数 EMA：不被环形缓冲截断（保持原累积逻辑）
+#    窗口聚合对每个 state 累积窗口内值后独立计算，此为扩展既有语义。
+#    本测试保证优化前后行为一致（rn=10 输出 90.0，与优化前相同）。
+# ------------------------------------------------------------------
+query T
+SELECT cast(round(cta_ema(price, 3) OVER (ORDER BY rn ROWS BETWEEN 9 PRECEDING AND CURRENT ROW), 4) AS VARCHAR)
+FROM series
+ORDER BY rn
+LIMIT 1 OFFSET 9;
+----
+90.0
+
+# EMA 在普通窗口 (window=period) 下的完整序列，确认与 window>>period 时的
+# 窗口聚合语义一致（不被环形缓冲改变）
+query T
+SELECT cast(round(cta_ema(price, 3) OVER (ORDER BY rn ROWS BETWEEN 2 PRECEDING AND CURRENT ROW), 4) AS VARCHAR)
+FROM series
+ORDER BY rn
+LIMIT 1 OFFSET 9;
+----
+90.0

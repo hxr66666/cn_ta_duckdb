@@ -1,0 +1,159 @@
+# name: test/sql/test_ts_agg.test
+# description: Test time-aligned window functions (cta_*_ts): gap ffill, bar_period, holidays, multi-input
+# group: [cn_ta]
+
+require cn_ta
+
+# ------------------------------------------------------------------
+# 1. P1 缺口前值填充（ffill）
+#    序列 09:31=10, 09:32=20, 09:35=30（缺 09:33、09:34 两根）
+#    ffill 后内部序列 = [10, 20, 20, 20, 30]
+#    sma3 在 09:35 = (20+20+30)/3 = 23.333...
+#    若不 ffill，会算出 (10+20+30)/3 = 20（错误）
+# ------------------------------------------------------------------
+statement ok
+CREATE TABLE t1(symbol VARCHAR, ts TIMESTAMP, close DOUBLE);
+INSERT INTO t1 VALUES
+    ('X','2026-08-06 09:31:00',10.0),
+    ('X','2026-08-06 09:32:00',20.0),
+    ('X','2026-08-06 09:35:00',30.0);
+
+query T
+SELECT cast(round(cta_sma_ts(ts, close, 3) OVER (PARTITION BY symbol ORDER BY ts), 3) AS VARCHAR)
+FROM t1
+ORDER BY ts;
+----
+NULL
+NULL
+23.333
+
+# ------------------------------------------------------------------
+# 2. 收盘集合竞价不产生缺口
+#    14:57 -> 15:00 之间是收盘竞价（14:58/14:59 非交易分钟），
+#    应视为相邻 bar，sma2 = (10+11)/2 = 10.5
+# ------------------------------------------------------------------
+statement ok
+CREATE TABLE t2(symbol VARCHAR, ts TIMESTAMP, close DOUBLE);
+INSERT INTO t2 VALUES
+    ('X','2026-08-06 14:57:00',10.0),
+    ('X','2026-08-06 15:00:00',11.0);
+
+query T
+SELECT cast(round(cta_sma_ts(ts, close, 2) OVER (PARTITION BY symbol ORDER BY ts), 2) AS VARCHAR)
+FROM t2
+ORDER BY ts;
+----
+NULL
+10.5
+
+# ------------------------------------------------------------------
+# 3. 午休时段不产生缺口
+#    11:30 -> 13:01 之间是午休（非交易时段），应视为相邻 bar
+# ------------------------------------------------------------------
+statement ok
+CREATE TABLE t3(symbol VARCHAR, ts TIMESTAMP, close DOUBLE);
+INSERT INTO t3 VALUES
+    ('X','2026-08-06 11:30:00',10.0),
+    ('X','2026-08-06 13:01:00',11.0);
+
+query T
+SELECT cast(round(cta_sma_ts(ts, close, 2) OVER (PARTITION BY symbol ORDER BY ts), 2) AS VARCHAR)
+FROM t3
+ORDER BY ts;
+----
+NULL
+10.5
+
+# ------------------------------------------------------------------
+# 4. bar_period 参数（5 分钟 K）
+#    09:31、09:36、09:41 是连续的 5 分钟 bar 起点，无缺口
+#    sma2 = (10+11)/2=10.5, (11+12)/2=11.5
+# ------------------------------------------------------------------
+statement ok
+CREATE TABLE t4(symbol VARCHAR, ts TIMESTAMP, close DOUBLE);
+INSERT INTO t4 VALUES
+    ('X','2026-08-06 09:31:00',10.0),
+    ('X','2026-08-06 09:36:00',11.0),
+    ('X','2026-08-06 09:41:00',12.0);
+
+query T
+SELECT cast(round(cta_sma_ts(ts, close, 2, 5) OVER (PARTITION BY symbol ORDER BY ts), 2) AS VARCHAR)
+FROM t4
+ORDER BY ts;
+----
+NULL
+10.5
+11.5
+
+# ------------------------------------------------------------------
+# 5. P3 多输入（high/low/close + period）：ATR
+#    4 根连续 K，ATR(3) 第 4 根出值 = 3.0
+# ------------------------------------------------------------------
+statement ok
+CREATE TABLE t5(symbol VARCHAR, ts TIMESTAMP, high DOUBLE, low DOUBLE, close DOUBLE);
+INSERT INTO t5 VALUES
+    ('X','2026-08-06 09:31:00',12.0,10.0,11.0),
+    ('X','2026-08-06 09:32:00',13.0,10.0,12.0),
+    ('X','2026-08-06 09:33:00',14.0,11.0,13.0),
+    ('X','2026-08-06 09:34:00',15.0,12.0,14.0);
+
+query T
+SELECT cast(round(cta_atr_ts(ts, high, low, close, 3) OVER (PARTITION BY symbol ORDER BY ts), 2) AS VARCHAR)
+FROM t5
+ORDER BY ts;
+----
+NULL
+NULL
+NULL
+3.0
+
+# ------------------------------------------------------------------
+# 6. P5 多输入（open/high/low/close）：avgprice = (O+H+L+C)/4
+# ------------------------------------------------------------------
+statement ok
+CREATE TABLE t6(symbol VARCHAR, ts TIMESTAMP, open DOUBLE, high DOUBLE, low DOUBLE, close DOUBLE);
+INSERT INTO t6 VALUES
+    ('X','2026-08-06 09:31:00',10.0,12.0,9.0,11.0),
+    ('X','2026-08-06 09:32:00',11.0,13.0,10.0,12.0);
+
+query T
+SELECT cast(round(cta_avgprice_ts(ts, open, high, low, close) OVER (PARTITION BY symbol ORDER BY ts), 2) AS VARCHAR)
+FROM t6
+ORDER BY ts;
+----
+10.5
+11.5
+
+# ------------------------------------------------------------------
+# 7. 交易日历：内置节假日 + 周末判定
+# ------------------------------------------------------------------
+query TTT
+SELECT cn_ta_is_trading_day(TIMESTAMP '2026-10-01 10:00:00'),  -- 国庆（休市）
+       cn_ta_is_trading_day(TIMESTAMP '2026-08-08 10:00:00'),  -- 周六（休市）
+       cn_ta_is_trading_day(TIMESTAMP '2026-08-06 10:00:00')   -- 周四（交易日）
+----
+false	false	true
+
+# ------------------------------------------------------------------
+# 8. 用户自定义休市日
+#    设置 2026-08-06 为休市日后，该日不再是交易日；清除后恢复
+# ------------------------------------------------------------------
+query T
+SELECT cn_ta_set_holiday(DATE '2026-08-06')
+----
+1
+
+query T
+SELECT cn_ta_is_trading_day(TIMESTAMP '2026-08-06 10:00:00')
+----
+false
+
+query T
+SELECT cn_ta_clear_holidays() >= 0
+----
+true
+
+query T
+SELECT cn_ta_is_trading_day(TIMESTAMP '2026-08-06 10:00:00')
+----
+true
