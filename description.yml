@@ -5,10 +5,10 @@ extension:
   language: C++
   build: cmake
   license: MIT
-  excluded_platforms: "wasm_mvp;wasm_eh;wasm_threads;windows_amd64_rtools;windows_amd64_mingw"
+  excluded_platforms: "wasm_mvp;wasm_eh;wasm_threads;windows_amd64;windows_amd64_rtools;windows_amd64_mingw"
 
 repo:
-  github: cn_ta/cn_ta
+  github: hxr66666/cn_ta_duckdb
   ref: HEAD
 
 docs:
