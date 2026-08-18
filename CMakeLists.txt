@@ -1,4 +1,9 @@
-cmake_minimum_required(VERSION 3.5)
+# NOTE: This CMakeLists.txt is NOT a standalone project. It is included by
+# DuckDB's build system via extension_config.cmake (duckdb_extension_load),
+# which provides the `build_static_extension` / `build_loadable_extension`
+# macros used below. An IDE that parses this file in isolation will falsely
+# report those commands as unknown; ignore such diagnostics.
+cmake_minimum_required(VERSION 3.5...3.29)
 
 set(TARGET_NAME cn_ta)
 set(EXTENSION_NAME ${TARGET_NAME}_extension)
