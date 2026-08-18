@@ -621,8 +621,10 @@ static void ComputeAll(CnTaIndicatorsGlobalState &g) {
 		add_col(name, std::move(col));
 	};
 
-	add_const("stat_var", StatVariance(close));
-	add_const("stat_stddev", std::isnan(StatVariance(close)) ? STAT_NAN : std::sqrt(StatVariance(close)));
+	// 缓存重复使用的统计量，避免对 close / log_returns 做多次 O(n) 扫描
+	double close_var = StatVariance(close);
+	add_const("stat_var", close_var);
+	add_const("stat_stddev", std::isnan(close_var) ? STAT_NAN : std::sqrt(close_var));
 	add_const("stat_skew", StatSkew(close));
 	add_const("stat_kurtosis", StatKurtosis(close));
 	add_const("stat_max_drawdown", StatMaxDrawdown(close));
@@ -633,9 +635,9 @@ static void ComputeAll(CnTaIndicatorsGlobalState &g) {
 		for (double v : log_returns)
 			if (!std::isnan(v))
 				r.push_back(v);
+		double r_var = StatVariance(r);
 		add_const("stat_sharpe", StatSharpe(r, 0.0, 252.0));
-		add_const("stat_annual_vol",
-		          std::isnan(StatVariance(r)) ? STAT_NAN : std::sqrt(StatVariance(r)) * std::sqrt(252.0));
+		add_const("stat_annual_vol", std::isnan(r_var) ? STAT_NAN : std::sqrt(r_var) * std::sqrt(252.0));
 	}
 	add_const("stat_corr_close_vol", StatCorr(close, volume));
 	add_const("stat_beta", StatBeta(close, volume));
@@ -657,46 +659,74 @@ static void ComputeAll(CnTaIndicatorsGlobalState &g) {
 	}
 
 	// ---- 滚动统计（每行列，窗口 20）----
+	// fn 接收 (const double* data, idx_t len)，不复制窗口，避免 O(n*win) 的堆分配。
 	const int ROLL_WIN = 20;
 	auto rolling = [&](const string &name, const vector<double> &src, auto fn) {
 		vector<double> col(n, NAN_VAL);
 		for (int i = 0; i < n; i++) {
 			if (i < ROLL_WIN - 1)
 				continue;
-			vector<double> w(src.begin() + i - ROLL_WIN + 1, src.begin() + i + 1);
-			col[i] = fn(w);
+			col[i] = fn(src.data() + i - ROLL_WIN + 1, (idx_t)ROLL_WIN);
 		}
 		add_col(name, std::move(col));
 	};
 
-	rolling("roll_avg_20", close, StatMean);
-	rolling("roll_sum_20", close, [](const vector<double> &x) {
+	rolling("roll_avg_20", close, [](const double *x, idx_t len) {
 		double s = 0;
-		for (double v : x)
-			s += v;
+		for (idx_t k = 0; k < len; k++)
+			s += x[k];
+		return s / (double)len;
+	});
+	rolling("roll_sum_20", close, [](const double *x, idx_t len) {
+		double s = 0;
+		for (idx_t k = 0; k < len; k++)
+			s += x[k];
 		return s;
 	});
-	rolling("roll_min_20", low, [](const vector<double> &x) {
+	rolling("roll_min_20", low, [](const double *x, idx_t len) {
 		double m = x[0];
-		for (double v : x)
-			m = std::min(m, v);
+		for (idx_t k = 1; k < len; k++)
+			m = std::min(m, x[k]);
 		return m;
 	});
-	rolling("roll_max_20", high, [](const vector<double> &x) {
+	rolling("roll_max_20", high, [](const double *x, idx_t len) {
 		double m = x[0];
-		for (double v : x)
-			m = std::max(m, v);
+		for (idx_t k = 1; k < len; k++)
+			m = std::max(m, x[k]);
 		return m;
 	});
-	rolling("roll_momentum_20", close, [](const vector<double> &x) {
-		if (x.size() < 2 || std::fabs(x.front()) < 1e-12)
+	rolling("roll_momentum_20", close, [](const double *x, idx_t len) {
+		if (len < 2 || std::fabs(x[0]) < 1e-12)
 			return STAT_NAN;
-		return (x.back() - x.front()) / std::fabs(x.front());
+		return (x[len - 1] - x[0]) / std::fabs(x[0]);
 	});
-	rolling("roll_var_20", close, StatVariance);
-	rolling("roll_stddev_20", close, [](const vector<double> &x) {
-		double v = StatVariance(x);
-		return std::isnan(v) ? v : std::sqrt(v);
+	rolling("roll_var_20", close, [](const double *x, idx_t len) {
+		if (len < 2)
+			return STAT_NAN;
+		double mean = 0;
+		for (idx_t k = 0; k < len; k++)
+			mean += x[k];
+		mean /= (double)len;
+		double s = 0;
+		for (idx_t k = 0; k < len; k++) {
+			double d = x[k] - mean;
+			s += d * d;
+		}
+		return s / (double)(len - 1);
+	});
+	rolling("roll_stddev_20", close, [](const double *x, idx_t len) {
+		if (len < 2)
+			return STAT_NAN;
+		double mean = 0;
+		for (idx_t k = 0; k < len; k++)
+			mean += x[k];
+		mean /= (double)len;
+		double s = 0;
+		for (idx_t k = 0; k < len; k++) {
+			double d = x[k] - mean;
+			s += d * d;
+		}
+		return std::sqrt(s / (double)(len - 1));
 	});
 
 	g.computed = true;
@@ -781,6 +811,21 @@ static unique_ptr<GlobalTableFunctionState> CnTaIndicatorsInit(ClientContext &co
 	return make_uniq<CnTaIndicatorsGlobalState>();
 }
 
+// 读取一列（非 ts）到 g.cols[c]，NULL → NaN。用 UnifiedVectorFormat 批量取值，
+// 避免逐行 GetValue()（每次都是类型分派 + Value 对象分配）。
+template <class T>
+static void AppendNumericCol(vector<double> &dst, UnifiedVectorFormat &vdata, idx_t count) {
+	auto data = UnifiedVectorFormat::GetData<T>(vdata);
+	for (idx_t r = 0; r < count; r++) {
+		auto idx = vdata.sel->get_index(r);
+		if (vdata.validity.RowIsValid(idx)) {
+			dst.push_back((double)data[idx]);
+		} else {
+			dst.push_back(std::numeric_limits<double>::quiet_NaN());
+		}
+	}
+}
+
 // in_out_function：累积输入 chunk，不输出（返回 NEED_MORE_INPUT）
 static OperatorResultType CnTaIndicatorsInOut(ExecutionContext &context, TableFunctionInput &data, DataChunk &input,
                                               DataChunk &output) {
@@ -788,27 +833,79 @@ static OperatorResultType CnTaIndicatorsInOut(ExecutionContext &context, TableFu
 	auto &bind = data.bind_data->Cast<CnTaIndicatorsBindData>();
 
 	idx_t ncols = input.ColumnCount();
+	idx_t count = input.size();
 	g.input_ncols = ncols;
-	for (idx_t c = 0; c < ncols; c++) {
-		for (idx_t r = 0; r < input.size(); r++) {
-			Value v = input.GetValue(c, r);
-			if (c == 0) {
-				// ts 列（TIMESTAMP）
-				if (v.IsNull()) {
-					g.ts_col.push_back(timestamp_t(0));
-				} else {
-					g.ts_col.push_back(v.GetValue<timestamp_t>());
-				}
-			} else {
-				// 数值列：统一转 double，NULL → NaN
-				if (v.IsNull()) {
-					g.cols[c].push_back(std::numeric_limits<double>::quiet_NaN());
-				} else {
-					g.cols[c].push_back(v.GetValue<double>());
-				}
-			}
+
+	// ts 列（TIMESTAMP）
+	{
+		UnifiedVectorFormat vdata;
+		input.data[0].ToUnifiedFormat(count, vdata);
+		auto tdata = UnifiedVectorFormat::GetData<timestamp_t>(vdata);
+		for (idx_t r = 0; r < count; r++) {
+			auto idx = vdata.sel->get_index(r);
+			g.ts_col.push_back(vdata.validity.RowIsValid(idx) ? tdata[idx] : timestamp_t(0));
 		}
 	}
+
+	// 数值列：按列类型分派，统一转 double
+	for (idx_t c = 1; c < ncols; c++) {
+		UnifiedVectorFormat vdata;
+		input.data[c].ToUnifiedFormat(count, vdata);
+		auto &type = input.data[c].GetType();
+		switch (type.id()) {
+		case LogicalTypeId::DOUBLE:
+			AppendNumericCol<double>(g.cols[c], vdata, count);
+			break;
+		case LogicalTypeId::FLOAT:
+			AppendNumericCol<float>(g.cols[c], vdata, count);
+			break;
+		case LogicalTypeId::BIGINT:
+			AppendNumericCol<int64_t>(g.cols[c], vdata, count);
+			break;
+		case LogicalTypeId::INTEGER:
+			AppendNumericCol<int32_t>(g.cols[c], vdata, count);
+			break;
+		case LogicalTypeId::SMALLINT:
+			AppendNumericCol<int16_t>(g.cols[c], vdata, count);
+			break;
+		case LogicalTypeId::TINYINT:
+			AppendNumericCol<int8_t>(g.cols[c], vdata, count);
+			break;
+		case LogicalTypeId::HUGEINT: {
+			// hugeint_t 无隐式转 double，手动转换
+			auto data = UnifiedVectorFormat::GetData<hugeint_t>(vdata);
+			for (idx_t r = 0; r < count; r++) {
+				auto idx = vdata.sel->get_index(r);
+				if (vdata.validity.RowIsValid(idx)) {
+					g.cols[c].push_back(Hugeint::Cast<double>(data[idx]));
+				} else {
+					g.cols[c].push_back(std::numeric_limits<double>::quiet_NaN());
+				}
+			}
+			break;
+		}
+		case LogicalTypeId::UTINYINT:
+			AppendNumericCol<uint8_t>(g.cols[c], vdata, count);
+			break;
+		case LogicalTypeId::USMALLINT:
+			AppendNumericCol<uint16_t>(g.cols[c], vdata, count);
+			break;
+		case LogicalTypeId::UINTEGER:
+			AppendNumericCol<uint32_t>(g.cols[c], vdata, count);
+			break;
+		case LogicalTypeId::UBIGINT:
+			AppendNumericCol<uint64_t>(g.cols[c], vdata, count);
+			break;
+		default:
+			// 兜底：非数值列用 GetValue 转 double（性能稍差，但保证正确性）
+			for (idx_t r = 0; r < count; r++) {
+				Value v = input.GetValue(c, r);
+				g.cols[c].push_back(v.IsNull() ? std::numeric_limits<double>::quiet_NaN() : v.GetValue<double>());
+			}
+			break;
+		}
+	}
+
 	output.SetCardinality(0);
 	return OperatorResultType::NEED_MORE_INPUT;
 }

@@ -11,7 +11,6 @@ extern "C" {
 #include <vector>
 #include <cstring>
 #include <algorithm>
-#include <set>
 
 namespace duckdb {
 
@@ -23,8 +22,11 @@ namespace duckdb {
 // 有状态递推函数（EMA/RSI/ATR/DX/CMO/TRIX/KAMA/DEMA/TEMA 等）不可截断。
 // ============================================================
 static bool IsTruncatableLookback(int (*lb)(int)) {
-	// 白名单 lookback 函数指针集合（仅 P1 局部窗口函数）
-	static const std::set<int (*)(int)> truncatable = {
+	// 白名单 lookback 函数指针（仅 P1 局部窗口函数）。
+	// 用静态数组 + 线性扫描替代 std::set 的 O(log n) 红黑树查找：
+	// 该函数在 AppendBounded 的每次 push_back 时都被调用，热路径上
+	// 数组缓存友好、无节点间接寻址，且只有 ~20 个元素，扫描更快。
+	static int (*truncatable[])(int) = {
 	    TA_SMA_Lookback,
 	    TA_WMA_Lookback,
 	    TA_TRIMA_Lookback,
@@ -45,7 +47,12 @@ static bool IsTruncatableLookback(int (*lb)(int)) {
 	    TA_LINEARREG_INTERCEPT_Lookback,
 	    TA_LINEARREG_SLOPE_Lookback,
 	};
-	return truncatable.count(lb) > 0;
+	for (auto f : truncatable) {
+		if (f == lb) {
+			return true;
+		}
+	}
+	return false;
 }
 
 // 受限追加：对白名单局部窗口函数，将 state 的累积长度限制在 [lookback+1, 2*(lookback+1)]。
@@ -233,7 +240,9 @@ struct CnTaAggP1Double {
 				int lb = LOOKBACK(state->period);
 				start = std::max(0, size - lb - 1);
 			}
-			std::vector<double> outReal(size);
+			// TA-Lib 输出只需容纳 [start, size-1] 区间，即 size - start 个元素，
+			// 截断时远小于 size，避免分配整个窗口大小的缓冲区。
+			std::vector<double> outReal(size - start);
 
 			TA_RetCode rc =
 			    TA_FUNC(start, size - 1, state->values->data(), state->period, &outBeg, &outNb, outReal.data());
@@ -365,7 +374,7 @@ struct CnTaAggP1Int {
 				int lb = LOOKBACK(state->period);
 				start = std::max(0, size - lb - 1);
 			}
-			std::vector<int> outInt(size);
+			std::vector<int> outInt(size - start);
 
 			TA_RetCode rc =
 			    TA_FUNC(start, size - 1, state->values->data(), state->period, &outBeg, &outNb, outInt.data());

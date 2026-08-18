@@ -7,34 +7,50 @@
 namespace duckdb {
 
 // ============================================================
-// Helper: extract scalar parameter values
+// Helper: pre-format columns ONCE (outside the row loop).
+// The old helpers called ToUnifiedFormat() inside the per-row loop,
+// turning every scalar function into O(count^2) work.
 // ============================================================
-static inline int32_t GetIntParam(DataChunk &args, idx_t col, idx_t row) {
+struct IntColView {
 	UnifiedVectorFormat vdata;
-	args.data[col].ToUnifiedFormat(args.size(), vdata);
-	auto data = UnifiedVectorFormat::GetData<int32_t>(vdata);
-	return data[vdata.sel->get_index(row)];
-}
+	const int32_t *data;
+	void Init(Vector &vec, idx_t count) {
+		vec.ToUnifiedFormat(count, vdata);
+		data = UnifiedVectorFormat::GetData<int32_t>(vdata);
+	}
+	inline int32_t Get(idx_t row) const {
+		return data[vdata.sel->get_index(row)];
+	}
+};
 
-static inline double GetDoubleParam(DataChunk &args, idx_t col, idx_t row) {
+struct DoubleColView {
 	UnifiedVectorFormat vdata;
-	args.data[col].ToUnifiedFormat(args.size(), vdata);
-	auto data = UnifiedVectorFormat::GetData<double>(vdata);
-	return data[vdata.sel->get_index(row)];
-}
+	const double *data;
+	void Init(Vector &vec, idx_t count) {
+		vec.ToUnifiedFormat(count, vdata);
+		data = UnifiedVectorFormat::GetData<double>(vdata);
+	}
+	inline double Get(idx_t row) const {
+		return data[vdata.sel->get_index(row)];
+	}
+};
 
-static inline list_entry_t GetListEntry(DataChunk &args, idx_t col, idx_t row) {
-	auto &vec = args.data[col];
+struct ListColView {
 	UnifiedVectorFormat vdata;
-	vec.ToUnifiedFormat(args.size(), vdata);
-	auto list_data = UnifiedVectorFormat::GetData<list_entry_t>(vdata);
-	auto idx = vdata.sel->get_index(row);
-	return list_data[idx];
-}
-
-static inline Vector &GetListChild(DataChunk &args, idx_t col) {
-	return ListVector::GetEntry(args.data[col]);
-}
+	const list_entry_t *list_data;
+	const Vector *child;
+	void Init(Vector &vec, idx_t count) {
+		vec.ToUnifiedFormat(count, vdata);
+		list_data = UnifiedVectorFormat::GetData<list_entry_t>(vdata);
+		child = &ListVector::GetEntry(vec);
+	}
+	inline list_entry_t Get(idx_t row) const {
+		return list_data[vdata.sel->get_index(row)];
+	}
+	inline const Vector &Child() const {
+		return *child;
+	}
+};
 
 // ============================================================
 // Helper: pack multi-output results into LIST<STRUCT>
@@ -124,15 +140,19 @@ static void PackStruct3Result(Vector &result, idx_t idx, int input_size, int out
 // ============================================================
 static void CnTaMacdScalar(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto count = args.size();
+	ListColView in;
+	IntColView fp, sp, sigp;
+	in.Init(args.data[0], count);
+	fp.Init(args.data[1], count);
+	sp.Init(args.data[2], count);
+	sigp.Init(args.data[3], count);
 	for (idx_t i = 0; i < count; i++) {
-		auto list = GetListEntry(args, 0, i);
-		auto &child = GetListChild(args, 0);
-		auto input = ListToDoubleArray(list, child);
+		auto input = ListToDoubleArray(in.Get(i), in.Child());
 		int size = (int)input.size();
 
-		int fast_period = GetIntParam(args, 1, i);
-		int slow_period = GetIntParam(args, 2, i);
-		int signal_period = GetIntParam(args, 3, i);
+		int fast_period = fp.Get(i);
+		int slow_period = sp.Get(i);
+		int signal_period = sigp.Get(i);
 
 		int outBeg = 0, outNb = 0;
 		std::vector<double> outMACD(size), outSignal(size), outHist(size);
@@ -152,16 +172,22 @@ static void CnTaMacdScalar(DataChunk &args, ExpressionState &state, Vector &resu
 // ============================================================
 static void CnTaBbandsScalar(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto count = args.size();
+	ListColView in;
+	IntColView tp, mt;
+	DoubleColView du, dd;
+	in.Init(args.data[0], count);
+	tp.Init(args.data[1], count);
+	du.Init(args.data[2], count);
+	dd.Init(args.data[3], count);
+	mt.Init(args.data[4], count);
 	for (idx_t i = 0; i < count; i++) {
-		auto list = GetListEntry(args, 0, i);
-		auto &child = GetListChild(args, 0);
-		auto input = ListToDoubleArray(list, child);
+		auto input = ListToDoubleArray(in.Get(i), in.Child());
 		int size = (int)input.size();
 
-		int time_period = GetIntParam(args, 1, i);
-		double nb_dev_up = GetDoubleParam(args, 2, i);
-		double nb_dev_dn = GetDoubleParam(args, 3, i);
-		int ma_type = GetIntParam(args, 4, i);
+		int time_period = tp.Get(i);
+		double nb_dev_up = du.Get(i);
+		double nb_dev_dn = dd.Get(i);
+		int ma_type = mt.Get(i);
 
 		int outBeg = 0, outNb = 0;
 		std::vector<double> outUpper(size), outMiddle(size), outLower(size);
@@ -181,20 +207,27 @@ static void CnTaBbandsScalar(DataChunk &args, ExpressionState &state, Vector &re
 // ============================================================
 static void CnTaStochScalar(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto count = args.size();
+	ListColView in_h, in_l, in_c;
+	IntColView fk, sk, skm, sd, sdm;
+	in_h.Init(args.data[0], count);
+	in_l.Init(args.data[1], count);
+	in_c.Init(args.data[2], count);
+	fk.Init(args.data[3], count);
+	sk.Init(args.data[4], count);
+	skm.Init(args.data[5], count);
+	sd.Init(args.data[6], count);
+	sdm.Init(args.data[7], count);
 	for (idx_t i = 0; i < count; i++) {
-		auto list_h = GetListEntry(args, 0, i);
-		auto list_l = GetListEntry(args, 1, i);
-		auto list_c = GetListEntry(args, 2, i);
-		auto high = ListToDoubleArray(list_h, GetListChild(args, 0));
-		auto low = ListToDoubleArray(list_l, GetListChild(args, 1));
-		auto close = ListToDoubleArray(list_c, GetListChild(args, 2));
+		auto high = ListToDoubleArray(in_h.Get(i), in_h.Child());
+		auto low = ListToDoubleArray(in_l.Get(i), in_l.Child());
+		auto close = ListToDoubleArray(in_c.Get(i), in_c.Child());
 		int size = (int)high.size();
 
-		int fastk_period = GetIntParam(args, 3, i);
-		int slowk_period = GetIntParam(args, 4, i);
-		int slowk_matype = GetIntParam(args, 5, i);
-		int slowd_period = GetIntParam(args, 6, i);
-		int slowd_matype = GetIntParam(args, 7, i);
+		int fastk_period = fk.Get(i);
+		int slowk_period = sk.Get(i);
+		int slowk_matype = skm.Get(i);
+		int slowd_period = sd.Get(i);
+		int slowd_matype = sdm.Get(i);
 
 		int outBeg = 0, outNb = 0;
 		std::vector<double> outSlowK(size), outSlowD(size);
@@ -215,14 +248,17 @@ static void CnTaStochScalar(DataChunk &args, ExpressionState &state, Vector &res
 // ============================================================
 static void CnTaAroonScalar(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto count = args.size();
+	ListColView in_h, in_l;
+	IntColView tp;
+	in_h.Init(args.data[0], count);
+	in_l.Init(args.data[1], count);
+	tp.Init(args.data[2], count);
 	for (idx_t i = 0; i < count; i++) {
-		auto list_h = GetListEntry(args, 0, i);
-		auto list_l = GetListEntry(args, 1, i);
-		auto high = ListToDoubleArray(list_h, GetListChild(args, 0));
-		auto low = ListToDoubleArray(list_l, GetListChild(args, 1));
+		auto high = ListToDoubleArray(in_h.Get(i), in_h.Child());
+		auto low = ListToDoubleArray(in_l.Get(i), in_l.Child());
 		int size = (int)high.size();
 
-		int time_period = GetIntParam(args, 2, i);
+		int time_period = tp.Get(i);
 
 		int outBeg = 0, outNb = 0;
 		std::vector<double> outDown(size), outUp(size);
@@ -242,13 +278,15 @@ static void CnTaAroonScalar(DataChunk &args, ExpressionState &state, Vector &res
 // ============================================================
 static void CnTaMinMaxScalar(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto count = args.size();
+	ListColView in;
+	IntColView tp;
+	in.Init(args.data[0], count);
+	tp.Init(args.data[1], count);
 	for (idx_t i = 0; i < count; i++) {
-		auto list = GetListEntry(args, 0, i);
-		auto &child = GetListChild(args, 0);
-		auto input = ListToDoubleArray(list, child);
+		auto input = ListToDoubleArray(in.Get(i), in.Child());
 		int size = (int)input.size();
 
-		int time_period = GetIntParam(args, 1, i);
+		int time_period = tp.Get(i);
 
 		int outBeg = 0, outNb = 0;
 		std::vector<double> outMin(size), outMax(size);
@@ -268,14 +306,17 @@ static void CnTaMinMaxScalar(DataChunk &args, ExpressionState &state, Vector &re
 // ============================================================
 static void CnTaMamaScalar(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto count = args.size();
+	ListColView in;
+	DoubleColView fl, sl;
+	in.Init(args.data[0], count);
+	fl.Init(args.data[1], count);
+	sl.Init(args.data[2], count);
 	for (idx_t i = 0; i < count; i++) {
-		auto list = GetListEntry(args, 0, i);
-		auto &child = GetListChild(args, 0);
-		auto input = ListToDoubleArray(list, child);
+		auto input = ListToDoubleArray(in.Get(i), in.Child());
 		int size = (int)input.size();
 
-		double fast_limit = GetDoubleParam(args, 1, i);
-		double slow_limit = GetDoubleParam(args, 2, i);
+		double fast_limit = fl.Get(i);
+		double slow_limit = sl.Get(i);
 
 		int outBeg = 0, outNb = 0;
 		std::vector<double> outMAMA(size), outFAMA(size);
@@ -295,10 +336,10 @@ static void CnTaMamaScalar(DataChunk &args, ExpressionState &state, Vector &resu
 // ============================================================
 static void CnTaHtPhasorScalar(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto count = args.size();
+	ListColView in;
+	in.Init(args.data[0], count);
 	for (idx_t i = 0; i < count; i++) {
-		auto list = GetListEntry(args, 0, i);
-		auto &child = GetListChild(args, 0);
-		auto input = ListToDoubleArray(list, child);
+		auto input = ListToDoubleArray(in.Get(i), in.Child());
 		int size = (int)input.size();
 
 		int outBeg = 0, outNb = 0;
@@ -320,10 +361,10 @@ static void CnTaHtPhasorScalar(DataChunk &args, ExpressionState &state, Vector &
 // ============================================================
 static void CnTaHtSineScalar(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto count = args.size();
+	ListColView in;
+	in.Init(args.data[0], count);
 	for (idx_t i = 0; i < count; i++) {
-		auto list = GetListEntry(args, 0, i);
-		auto &child = GetListChild(args, 0);
-		auto input = ListToDoubleArray(list, child);
+		auto input = ListToDoubleArray(in.Get(i), in.Child());
 		int size = (int)input.size();
 
 		int outBeg = 0, outNb = 0;

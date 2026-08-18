@@ -6,20 +6,46 @@
 namespace duckdb {
 
 // ============================================================
-// Helper: extract list_entry_t from a unified vector format
+// Helper: pre-format a list column ONCE (outside the row loop) and expose
+// the list_entry_t data + child vector.  The old GetListEntry() called
+// ToUnifiedFormat() inside the per-row loop, turning every scalar function
+// into O(count^2) work.  Now we format each column exactly once.
 // ============================================================
-static inline list_entry_t GetListEntry(DataChunk &args, idx_t col, idx_t row) {
-	auto &vec = args.data[col];
+struct ListColView {
 	UnifiedVectorFormat vdata;
-	vec.ToUnifiedFormat(args.size(), vdata);
-	auto list_data = UnifiedVectorFormat::GetData<list_entry_t>(vdata);
-	auto idx = vdata.sel->get_index(row);
-	return list_data[idx];
-}
+	const list_entry_t *list_data;
+	const Vector *child;
 
-static inline Vector &GetListChild(DataChunk &args, idx_t col) {
-	return ListVector::GetEntry(args.data[col]);
-}
+	void Init(Vector &vec, idx_t count) {
+		vec.ToUnifiedFormat(count, vdata);
+		list_data = UnifiedVectorFormat::GetData<list_entry_t>(vdata);
+		child = &ListVector::GetEntry(vec);
+	}
+
+	inline list_entry_t Get(idx_t row) const {
+		return list_data[vdata.sel->get_index(row)];
+	}
+
+	inline const Vector &Child() const {
+		return *child;
+	}
+};
+
+// Pre-format a scalar (non-list) column once.  Returns a pointer to the
+// unified-format data and lets callers index by row via sel.
+struct ScalarColView {
+	UnifiedVectorFormat vdata;
+	const int32_t *i32_data;
+
+	void Init(Vector &vec, idx_t count) {
+		vec.ToUnifiedFormat(count, vdata);
+		i32_data = UnifiedVectorFormat::GetData<int32_t>(vdata);
+	}
+
+	inline int32_t GetInt(idx_t row) const {
+		return i32_data[vdata.sel->get_index(row)];
+	}
+};
 
 // ============================================================
 // P1: (LIST<DOUBLE>, INTEGER) -> LIST<DOUBLE> or LIST<INTEGER>
@@ -30,22 +56,19 @@ static inline Vector &GetListChild(DataChunk &args, idx_t col) {
 template <TA_RetCode (*TA_FUNC)(int, int, const double[], int, int *, int *, double[])>
 static void CnTaScalarP1Double(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto count = args.size();
+	ListColView in;
+	ScalarColView period;
+	in.Init(args.data[0], count);
+	period.Init(args.data[1], count);
 	for (idx_t i = 0; i < count; i++) {
-		auto list = GetListEntry(args, 0, i);
-		auto &child = GetListChild(args, 0);
-		auto input = ListToDoubleArray(list, child);
+		auto input = ListToDoubleArray(in.Get(i), in.Child());
 		int size = (int)input.size();
 
-		// Get period parameter
-		UnifiedVectorFormat period_data;
-		args.data[1].ToUnifiedFormat(count, period_data);
-		auto periods = UnifiedVectorFormat::GetData<int32_t>(period_data);
-		auto period_idx = period_data.sel->get_index(i);
-		int period = periods[period_idx];
+		int p = period.GetInt(i);
 
 		int outBeg = 0, outNb = 0;
 		std::vector<double> outReal(size);
-		TA_RetCode rc = TA_FUNC(0, size - 1, input.data(), period, &outBeg, &outNb, outReal.data());
+		TA_RetCode rc = TA_FUNC(0, size - 1, input.data(), p, &outBeg, &outNb, outReal.data());
 		if (rc != TA_SUCCESS) {
 			outNb = 0;
 			outBeg = 0;
@@ -58,21 +81,19 @@ static void CnTaScalarP1Double(DataChunk &args, ExpressionState &state, Vector &
 template <TA_RetCode (*TA_FUNC)(int, int, const double[], int, int *, int *, int[])>
 static void CnTaScalarP1Int(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto count = args.size();
+	ListColView in;
+	ScalarColView period;
+	in.Init(args.data[0], count);
+	period.Init(args.data[1], count);
 	for (idx_t i = 0; i < count; i++) {
-		auto list = GetListEntry(args, 0, i);
-		auto &child = GetListChild(args, 0);
-		auto input = ListToDoubleArray(list, child);
+		auto input = ListToDoubleArray(in.Get(i), in.Child());
 		int size = (int)input.size();
 
-		UnifiedVectorFormat period_data;
-		args.data[1].ToUnifiedFormat(count, period_data);
-		auto periods = UnifiedVectorFormat::GetData<int32_t>(period_data);
-		auto period_idx = period_data.sel->get_index(i);
-		int period = periods[period_idx];
+		int p = period.GetInt(i);
 
 		int outBeg = 0, outNb = 0;
 		std::vector<int> outInt(size);
-		TA_RetCode rc = TA_FUNC(0, size - 1, input.data(), period, &outBeg, &outNb, outInt.data());
+		TA_RetCode rc = TA_FUNC(0, size - 1, input.data(), p, &outBeg, &outNb, outInt.data());
 		if (rc != TA_SUCCESS) {
 			outNb = 0;
 			outBeg = 0;
@@ -90,10 +111,10 @@ static void CnTaScalarP1Int(DataChunk &args, ExpressionState &state, Vector &res
 template <TA_RetCode (*TA_FUNC)(int, int, const double[], int *, int *, double[])>
 static void CnTaScalarP2Double(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto count = args.size();
+	ListColView in;
+	in.Init(args.data[0], count);
 	for (idx_t i = 0; i < count; i++) {
-		auto list = GetListEntry(args, 0, i);
-		auto &child = GetListChild(args, 0);
-		auto input = ListToDoubleArray(list, child);
+		auto input = ListToDoubleArray(in.Get(i), in.Child());
 		int size = (int)input.size();
 
 		int outBeg = 0, outNb = 0;
@@ -111,10 +132,10 @@ static void CnTaScalarP2Double(DataChunk &args, ExpressionState &state, Vector &
 template <TA_RetCode (*TA_FUNC)(int, int, const double[], int *, int *, int[])>
 static void CnTaScalarP2Int(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto count = args.size();
+	ListColView in;
+	in.Init(args.data[0], count);
 	for (idx_t i = 0; i < count; i++) {
-		auto list = GetListEntry(args, 0, i);
-		auto &child = GetListChild(args, 0);
-		auto input = ListToDoubleArray(list, child);
+		auto input = ListToDoubleArray(in.Get(i), in.Child());
 		int size = (int)input.size();
 
 		int outBeg = 0, outNb = 0;
@@ -135,25 +156,23 @@ static void CnTaScalarP2Int(DataChunk &args, ExpressionState &state, Vector &res
 template <TA_RetCode (*TA_FUNC)(int, int, const double[], const double[], const double[], int, int *, int *, double[])>
 static void CnTaScalarP3(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto count = args.size();
+	ListColView in_h, in_l, in_c;
+	ScalarColView period;
+	in_h.Init(args.data[0], count);
+	in_l.Init(args.data[1], count);
+	in_c.Init(args.data[2], count);
+	period.Init(args.data[3], count);
 	for (idx_t i = 0; i < count; i++) {
-		auto list_h = GetListEntry(args, 0, i);
-		auto list_l = GetListEntry(args, 1, i);
-		auto list_c = GetListEntry(args, 2, i);
-		auto high = ListToDoubleArray(list_h, GetListChild(args, 0));
-		auto low = ListToDoubleArray(list_l, GetListChild(args, 1));
-		auto close = ListToDoubleArray(list_c, GetListChild(args, 2));
+		auto high = ListToDoubleArray(in_h.Get(i), in_h.Child());
+		auto low = ListToDoubleArray(in_l.Get(i), in_l.Child());
+		auto close = ListToDoubleArray(in_c.Get(i), in_c.Child());
 		int size = (int)high.size();
 
-		UnifiedVectorFormat period_data;
-		args.data[3].ToUnifiedFormat(count, period_data);
-		auto periods = UnifiedVectorFormat::GetData<int32_t>(period_data);
-		auto period_idx = period_data.sel->get_index(i);
-		int period = periods[period_idx];
+		int p = period.GetInt(i);
 
 		int outBeg = 0, outNb = 0;
 		std::vector<double> outReal(size);
-		TA_RetCode rc =
-		    TA_FUNC(0, size - 1, high.data(), low.data(), close.data(), period, &outBeg, &outNb, outReal.data());
+		TA_RetCode rc = TA_FUNC(0, size - 1, high.data(), low.data(), close.data(), p, &outBeg, &outNb, outReal.data());
 		if (rc != TA_SUCCESS) {
 			outNb = 0;
 			outBeg = 0;
@@ -170,15 +189,16 @@ template <TA_RetCode (*TA_FUNC)(int, int, const double[], const double[], const 
                                 double[])>
 static void CnTaScalarP4(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto count = args.size();
+	ListColView in_h, in_l, in_c, in_v;
+	in_h.Init(args.data[0], count);
+	in_l.Init(args.data[1], count);
+	in_c.Init(args.data[2], count);
+	in_v.Init(args.data[3], count);
 	for (idx_t i = 0; i < count; i++) {
-		auto list_h = GetListEntry(args, 0, i);
-		auto list_l = GetListEntry(args, 1, i);
-		auto list_c = GetListEntry(args, 2, i);
-		auto list_v = GetListEntry(args, 3, i);
-		auto high = ListToDoubleArray(list_h, GetListChild(args, 0));
-		auto low = ListToDoubleArray(list_l, GetListChild(args, 1));
-		auto close = ListToDoubleArray(list_c, GetListChild(args, 2));
-		auto volume = ListToDoubleArray(list_v, GetListChild(args, 3));
+		auto high = ListToDoubleArray(in_h.Get(i), in_h.Child());
+		auto low = ListToDoubleArray(in_l.Get(i), in_l.Child());
+		auto close = ListToDoubleArray(in_c.Get(i), in_c.Child());
+		auto volume = ListToDoubleArray(in_v.Get(i), in_v.Child());
 		int size = (int)high.size();
 
 		int outBeg = 0, outNb = 0;
@@ -201,15 +221,16 @@ template <TA_RetCode (*TA_FUNC)(int, int, const double[], const double[], const 
                                 double[])>
 static void CnTaScalarP5Double(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto count = args.size();
+	ListColView in_o, in_h, in_l, in_c;
+	in_o.Init(args.data[0], count);
+	in_h.Init(args.data[1], count);
+	in_l.Init(args.data[2], count);
+	in_c.Init(args.data[3], count);
 	for (idx_t i = 0; i < count; i++) {
-		auto list_o = GetListEntry(args, 0, i);
-		auto list_h = GetListEntry(args, 1, i);
-		auto list_l = GetListEntry(args, 2, i);
-		auto list_c = GetListEntry(args, 3, i);
-		auto open_ = ListToDoubleArray(list_o, GetListChild(args, 0));
-		auto high = ListToDoubleArray(list_h, GetListChild(args, 1));
-		auto low = ListToDoubleArray(list_l, GetListChild(args, 2));
-		auto close = ListToDoubleArray(list_c, GetListChild(args, 3));
+		auto open_ = ListToDoubleArray(in_o.Get(i), in_o.Child());
+		auto high = ListToDoubleArray(in_h.Get(i), in_h.Child());
+		auto low = ListToDoubleArray(in_l.Get(i), in_l.Child());
+		auto close = ListToDoubleArray(in_c.Get(i), in_c.Child());
 		int size = (int)open_.size();
 
 		int outBeg = 0, outNb = 0;
@@ -232,15 +253,16 @@ template <TA_RetCode (*TA_FUNC)(int, int, const double[], const double[], const 
                                 int[])>
 static void CnTaScalarP5Int(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto count = args.size();
+	ListColView in_o, in_h, in_l, in_c;
+	in_o.Init(args.data[0], count);
+	in_h.Init(args.data[1], count);
+	in_l.Init(args.data[2], count);
+	in_c.Init(args.data[3], count);
 	for (idx_t i = 0; i < count; i++) {
-		auto list_o = GetListEntry(args, 0, i);
-		auto list_h = GetListEntry(args, 1, i);
-		auto list_l = GetListEntry(args, 2, i);
-		auto list_c = GetListEntry(args, 3, i);
-		auto open_ = ListToDoubleArray(list_o, GetListChild(args, 0));
-		auto high = ListToDoubleArray(list_h, GetListChild(args, 1));
-		auto low = ListToDoubleArray(list_l, GetListChild(args, 2));
-		auto close = ListToDoubleArray(list_c, GetListChild(args, 3));
+		auto open_ = ListToDoubleArray(in_o.Get(i), in_o.Child());
+		auto high = ListToDoubleArray(in_h.Get(i), in_h.Child());
+		auto low = ListToDoubleArray(in_l.Get(i), in_l.Child());
+		auto close = ListToDoubleArray(in_c.Get(i), in_c.Child());
 		int size = (int)open_.size();
 
 		int outBeg = 0, outNb = 0;
@@ -262,11 +284,12 @@ static void CnTaScalarP5Int(DataChunk &args, ExpressionState &state, Vector &res
 template <TA_RetCode (*TA_FUNC)(int, int, const double[], const double[], int *, int *, double[])>
 static void CnTaScalarP6(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto count = args.size();
+	ListColView in_h, in_l;
+	in_h.Init(args.data[0], count);
+	in_l.Init(args.data[1], count);
 	for (idx_t i = 0; i < count; i++) {
-		auto list_h = GetListEntry(args, 0, i);
-		auto list_l = GetListEntry(args, 1, i);
-		auto high = ListToDoubleArray(list_h, GetListChild(args, 0));
-		auto low = ListToDoubleArray(list_l, GetListChild(args, 1));
+		auto high = ListToDoubleArray(in_h.Get(i), in_h.Child());
+		auto low = ListToDoubleArray(in_l.Get(i), in_l.Child());
 		int size = (int)high.size();
 
 		int outBeg = 0, outNb = 0;
@@ -287,13 +310,14 @@ static void CnTaScalarP6(DataChunk &args, ExpressionState &state, Vector &result
 template <TA_RetCode (*TA_FUNC)(int, int, const double[], const double[], const double[], int *, int *, double[])>
 static void CnTaScalarP7(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto count = args.size();
+	ListColView in_h, in_l, in_c;
+	in_h.Init(args.data[0], count);
+	in_l.Init(args.data[1], count);
+	in_c.Init(args.data[2], count);
 	for (idx_t i = 0; i < count; i++) {
-		auto list_h = GetListEntry(args, 0, i);
-		auto list_l = GetListEntry(args, 1, i);
-		auto list_c = GetListEntry(args, 2, i);
-		auto high = ListToDoubleArray(list_h, GetListChild(args, 0));
-		auto low = ListToDoubleArray(list_l, GetListChild(args, 1));
-		auto close = ListToDoubleArray(list_c, GetListChild(args, 2));
+		auto high = ListToDoubleArray(in_h.Get(i), in_h.Child());
+		auto low = ListToDoubleArray(in_l.Get(i), in_l.Child());
+		auto close = ListToDoubleArray(in_c.Get(i), in_c.Child());
 		int size = (int)high.size();
 
 		int outBeg = 0, outNb = 0;
@@ -314,22 +338,21 @@ static void CnTaScalarP7(DataChunk &args, ExpressionState &state, Vector &result
 template <TA_RetCode (*TA_FUNC)(int, int, const double[], const double[], int, int *, int *, double[])>
 static void CnTaScalarP8(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto count = args.size();
+	ListColView in_h, in_l;
+	ScalarColView period;
+	in_h.Init(args.data[0], count);
+	in_l.Init(args.data[1], count);
+	period.Init(args.data[2], count);
 	for (idx_t i = 0; i < count; i++) {
-		auto list_h = GetListEntry(args, 0, i);
-		auto list_l = GetListEntry(args, 1, i);
-		auto high = ListToDoubleArray(list_h, GetListChild(args, 0));
-		auto low = ListToDoubleArray(list_l, GetListChild(args, 1));
+		auto high = ListToDoubleArray(in_h.Get(i), in_h.Child());
+		auto low = ListToDoubleArray(in_l.Get(i), in_l.Child());
 		int size = (int)high.size();
 
-		UnifiedVectorFormat period_data;
-		args.data[2].ToUnifiedFormat(count, period_data);
-		auto periods = UnifiedVectorFormat::GetData<int32_t>(period_data);
-		auto period_idx = period_data.sel->get_index(i);
-		int period = periods[period_idx];
+		int p = period.GetInt(i);
 
 		int outBeg = 0, outNb = 0;
 		std::vector<double> outReal(size);
-		TA_RetCode rc = TA_FUNC(0, size - 1, high.data(), low.data(), period, &outBeg, &outNb, outReal.data());
+		TA_RetCode rc = TA_FUNC(0, size - 1, high.data(), low.data(), p, &outBeg, &outNb, outReal.data());
 		if (rc != TA_SUCCESS) {
 			outNb = 0;
 			outBeg = 0;
