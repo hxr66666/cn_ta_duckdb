@@ -219,55 +219,55 @@ def setup_duckdb(ext_path: str, csv_path: str, raw_csv_path: str):
         FROM read_csv('{raw_csv_path}', auto_detect=true, header=true,
                       types={{'symbol': 'VARCHAR'}});
     """)
-    n = con.execute("SELECT count(*) FROM ticks;").fetchone()[0]
-    nr = con.execute("SELECT count(*) FROM ticks_raw;").fetchone()[0]
+    n = con.execute("SELECT count(*) AS c FROM ticks;").fetchnumpy()["c"][0]
+    nr = con.execute("SELECT count(*) AS c FROM ticks_raw;").fetchnumpy()["c"][0]
     print(f"[duckdb] 内存表 ticks: {n} 行 (对齐) / ticks_raw: {nr} 行 (原始) 一次性导入完成")
     return con
 
 
+def _columns_to_grouped(con, sql: str) -> dict[str, dict[str, np.ndarray]]:
+    """用 fetchnumpy 列式取回结果，再用 pandas groupby 按 symbol 分组，
+    避免 fetchall + 逐行 Python 循环装箱。"""
+    cols = con.execute(sql).fetchnumpy()
+    df = pd.DataFrame({
+        "symbol": cols["symbol"].astype(str),
+        "sma20": cols["sma20"],
+        "ema20": cols["ema20"],
+        "rsi14": cols["rsi14"],
+    })
+    out: dict[str, dict[str, np.ndarray]] = {}
+    for sym, grp in df.groupby("symbol", sort=False):
+        out[sym] = {
+            "sma20": grp["sma20"].to_numpy(dtype=float),
+            "ema20": grp["ema20"].to_numpy(dtype=float),
+            "rsi14": grp["rsi14"].to_numpy(dtype=float),
+        }
+    return out
+
+
 def query_cn_ta(con) -> dict[str, np.ndarray]:
     """仅执行指标计算 SQL（进入性能基准）。按股票分组用 cta_* 窗口聚合。"""
-    res = con.execute("""
+    return _columns_to_grouped(con, """
         SELECT symbol,
                cta_sma(close, 20) OVER (PARTITION BY symbol ORDER BY ts) AS sma20,
                cta_ema(close, 20) OVER (PARTITION BY symbol ORDER BY ts) AS ema20,
                cta_rsi(close, 14) OVER (PARTITION BY symbol ORDER BY ts) AS rsi14
         FROM ticks
         ORDER BY symbol, ts;
-    """).fetchall()
-
-    out: dict[str, np.ndarray] = {}
-    for sym, s, e, r in res:
-        d = out.setdefault(str(sym), {"sma20": [], "ema20": [], "rsi14": []})
-        d["sma20"].append(s)
-        d["ema20"].append(e)
-        d["rsi14"].append(r)
-    for sym, d in out.items():
-        out[sym] = {k: np.asarray(v, dtype=float) for k, v in d.items()}
-    return out
+    """)
 
 
 def query_cn_ta_ts(con) -> dict[str, np.ndarray]:
     """用 cta_*_ts 扩展内自动对齐，直接作用于原始（未补齐）数据。
     验证扩展内部时间戳对齐与数据层对齐结果一致。"""
-    res = con.execute("""
+    return _columns_to_grouped(con, """
         SELECT symbol,
                cta_sma_ts(ts, close, 20) OVER (PARTITION BY symbol ORDER BY ts) AS sma20,
                cta_ema_ts(ts, close, 20) OVER (PARTITION BY symbol ORDER BY ts) AS ema20,
                cta_rsi_ts(ts, close, 14) OVER (PARTITION BY symbol ORDER BY ts) AS rsi14
         FROM ticks_raw
         ORDER BY symbol, ts;
-    """).fetchall()
-
-    out: dict[str, np.ndarray] = {}
-    for sym, s, e, r in res:
-        d = out.setdefault(str(sym), {"sma20": [], "ema20": [], "rsi14": []})
-        d["sma20"].append(s)
-        d["ema20"].append(e)
-        d["rsi14"].append(r)
-    for sym, d in out.items():
-        out[sym] = {k: np.asarray(v, dtype=float) for k, v in d.items()}
-    return out
+    """)
 
 
 def query_native(con) -> None:
@@ -279,7 +279,7 @@ def query_native(con) -> None:
                    ROWS BETWEEN 19 PRECEDING AND CURRENT ROW) AS sma20
         FROM ticks
         ORDER BY symbol, ts;
-    """).fetchall()
+    """).fetchnumpy()
 
 
 # --------------------------------------------------------------------------- #

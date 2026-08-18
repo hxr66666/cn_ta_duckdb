@@ -79,7 +79,7 @@ def main() -> None:
     """)
     elapsed = time.perf_counter() - t0
 
-    nrows = con.execute("SELECT count(*) FROM ind_result").fetchone()[0]
+    nrows = con.execute("SELECT count(*) AS c FROM ind_result").fetchnumpy()["c"][0]
     ncols = len(con.execute("SELECT * FROM ind_result LIMIT 0").description)
     print(f"生成宽表: {nrows} 行 × {ncols} 列，耗时 {elapsed:.3f}s")
 
@@ -106,17 +106,22 @@ def main() -> None:
     for k, v in cat.items():
         print(f"  {k}: {v} 列")
 
-    # 4. 抽取关键指标展示
+    # 4. 抽取关键指标展示（fetchnumpy 列式取数，配合 numpy 数组展示）
     print("\n关键指标预览（前 3 行）:")
-    sample = con.execute(f"""
+    sample = con.execute("""
         SELECT ts, close, sma_20, rsi_12, atr_14, pct_change, stat_sharpe
         FROM ind_result ORDER BY ts LIMIT 100
-    """).fetchall()
+    """).fetchnumpy()
+    ts_col = sample["ts"]
+
+    def fmt(v: float | None) -> str:
+        return "   NULL" if v is None else f"{v:8.4f}"
+
     print("  ts                  close    sma_20    rsi_12   atr_14   pct_change  stat_sharpe")
-    for row in sample:
-        def fmt(v):
-            return "   NULL" if v is None else f"{v:8.4f}"
-        print(f"  {str(row[0])[:19]:19s} {fmt(row[1])} {fmt(row[2])} {fmt(row[3])} {fmt(row[4])} {fmt(row[5])} {fmt(row[6])}")
+    for i in range(len(ts_col)):
+        print(f"  {str(ts_col[i])[:19]:19s} {fmt(sample['close'][i])} {fmt(sample['sma_20'][i])} "
+              f"{fmt(sample['rsi_12'][i])} {fmt(sample['atr_14'][i])} {fmt(sample['pct_change'][i])} "
+              f"{fmt(sample['stat_sharpe'][i])}")
 
     # 5. 提示：如何查询指定列
     print("\n只取需要的列：")

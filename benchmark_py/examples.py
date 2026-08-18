@@ -17,31 +17,37 @@ examples
 """
 
 from __future__ import annotations
+from re import L
+from sre_parse import ANY
+from typing import Any
 
+from _duckdb import DuckDBPyConnection
+import duckdb
 import argparse
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_EXT = ROOT / "build" / "release" / "extension" / "cn_ta" / "cn_ta.duckdb_extension"
+DEFAULT_EXT = (
+    ROOT / "build" / "release" / "extension" / "cn_ta" / "cn_ta.duckdb_extension"
+)
 
 # 排除的辅助/内部函数（stats 是 DuckDB 调试函数，非本扩展）
 EXCLUDE = {"stats"}
 
 
-def setup(ext_path: str):
-    import duckdb
-
+def setup(ext_path: str) -> DuckDBPyConnection:
     con = duckdb.connect(config={"allow_unsigned_extensions": True})
     if not Path(ext_path).exists():
         raise FileNotFoundError(f"扩展未找到: {ext_path}")
-    con.execute(f"LOAD '{ext_path}';")
+
+    _ = con.execute(f"LOAD '{ext_path}';")
     return con
 
 
-def build_sample_table(con) -> None:
+def build_sample_table(con: DuckDBPyConnection) -> None:
     """建一张覆盖 OHLCV + 时间戳的示例表。"""
-    con.execute("DROP TABLE IF EXISTS ohlc")
-    con.execute("""
+    _ = con.execute("DROP TABLE IF EXISTS ohlc")
+    _ = con.execute("""
         CREATE TABLE ohlc AS
         SELECT * FROM (VALUES
             (TIMESTAMP '2026-08-05 09:31:00', 10.0, 11.2,  9.8, 10.5, 120000.0, 100000.0),
@@ -58,9 +64,13 @@ def build_sample_table(con) -> None:
     """)
 
 
-def fetch_functions(con) -> list[dict]:
-    """读取扩展注册的全部函数签名（去重函数名，保留标量/聚合各一个代表签名）。"""
-    rows = con.execute("""
+def fetch_functions(con: DuckDBPyConnection) -> list[dict[Any, Any]]:
+    """读取扩展注册的全部函数签名（去重函数名，保留标量/聚合各一个代表签名）。
+
+    用 fetchnumpy() 一次性取列式 numpy 数组，避免 fetchall() 逐行构造
+    Python tuple 对象（341 行 × 5 列的小元数据，列式读取更快且省内存）。
+    """
+    cols = con.execute("""
         SELECT function_name, function_type, parameter_types, return_type, parameters
         FROM duckdb_functions()
         WHERE function_name LIKE 'ct_%'
@@ -68,25 +78,30 @@ def fetch_functions(con) -> list[dict]:
            OR function_name LIKE 'stat_%'
            OR function_name LIKE 'cn_%'
         ORDER BY function_name
-    """).fetchall()
+    """).fetchnumpy()
+
+    names = cols["function_name"]
+    types = cols["function_type"]
+    ptypes = cols["parameter_types"]
+    rtypes = cols["return_type"]
+    params = cols["parameters"]
 
     funcs: dict[str, dict] = {}
-    for name, ftype, ptypes, rtype, params in rows:
+    for i in range(len(names)):
+        name = names[i]
         if name in EXCLUDE:
             continue
         # 同一函数名的多重重载（如 _ts 带/不带 bar_period），保留参数最少的一个代表签名
-        key = name
-        if key in funcs:
-            if len(ptypes) < len(funcs[key]["ptypes"]):
-                funcs[key] = {
-                    "name": name, "type": ftype, "ptypes": list(ptypes),
-                    "rtype": rtype, "params": list(params),
-                }
-        else:
-            funcs[key] = {
-                "name": name, "type": ftype, "ptypes": list(ptypes),
-                "rtype": rtype, "params": list(params),
-            }
+        ptype_list = list(ptypes[i])
+        if name in funcs and len(ptype_list) >= len(funcs[name]["ptypes"]):
+            continue
+        funcs[name] = {
+            "name": name,
+            "type": types[i],
+            "ptypes": ptype_list,
+            "rtype": rtypes[i],
+            "params": list(params[i]),
+        }
     return sorted(funcs.values(), key=lambda f: f["name"])
 
 
@@ -151,6 +166,9 @@ def build_aggregate_sql(f: dict) -> str:
 def build_sql(f: dict) -> str:
     if f["type"] == "scalar":
         return build_scalar_sql(f)
+    if f["type"] == "table":
+        # 表函数（如 cn_ta_indicators）不能用 OVER，需用 FROM ... 方式调用
+        return "SELECT * FROM cn_ta_indicators((SELECT * FROM ohlc))"
     return build_aggregate_sql(f)
 
 
@@ -184,10 +202,12 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--ext", default=str(DEFAULT_EXT))
     ap.add_argument("--list-only", action="store_true", help="只打印函数清单，不执行")
-    ap.add_argument("--sql", action="store_true", help="执行 examples.sql（带注释的可读示例）")
+    ap.add_argument(
+        "--sql", action="store_true", help="执行 examples.sql（带注释的可读示例）"
+    )
     args = ap.parse_args()
 
-    con = setup(args.ext)
+    con: DuckDBPyConnection = setup(args.ext)
     build_sample_table(con)
     funcs = fetch_functions(con)
 

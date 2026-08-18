@@ -146,28 +146,32 @@ def test_consistency(con) -> None:
     ps = to_list_sql(prices)
     rs = to_list_sql(returns)
 
-    # 单变量统计
-    compare("stat_var", con.execute(f"SELECT stat_var({xs})").fetchone()[0], ref_var(x))
-    compare("stat_stddev", con.execute(f"SELECT stat_stddev({xs})").fetchone()[0], ref_stddev(x))
-    compare("stat_skew", con.execute(f"SELECT stat_skew({xs})").fetchone()[0], ref_skew(x))
-    compare("stat_kurtosis", con.execute(f"SELECT stat_kurtosis({xs})").fetchone()[0], ref_kurtosis(x))
-    compare("stat_max_drawdown", con.execute(f"SELECT stat_max_drawdown({ps})").fetchone()[0], ref_max_drawdown(prices))
-    compare("stat_sharpe", con.execute(f"SELECT stat_sharpe({rs}, 0.02, 252)").fetchone()[0], ref_sharpe(returns, 0.02, 252))
-    compare("stat_annual_vol", con.execute(f"SELECT stat_annual_vol({rs}, 252)").fetchone()[0], ref_annual_vol(returns, 252))
+    # 单变量统计（fetchnumpy 列式取数，避免逐行 fetchone 装箱）
+    compare("stat_var", con.execute(f"SELECT stat_var({xs}) AS v").fetchnumpy()["v"][0], ref_var(x))
+    compare("stat_stddev", con.execute(f"SELECT stat_stddev({xs}) AS v").fetchnumpy()["v"][0], ref_stddev(x))
+    compare("stat_skew", con.execute(f"SELECT stat_skew({xs}) AS v").fetchnumpy()["v"][0], ref_skew(x))
+    compare("stat_kurtosis", con.execute(f"SELECT stat_kurtosis({xs}) AS v").fetchnumpy()["v"][0], ref_kurtosis(x))
+    compare("stat_max_drawdown", con.execute(f"SELECT stat_max_drawdown({ps}) AS v").fetchnumpy()["v"][0], ref_max_drawdown(prices))
+    compare("stat_sharpe", con.execute(f"SELECT stat_sharpe({rs}, 0.02, 252) AS v").fetchnumpy()["v"][0], ref_sharpe(returns, 0.02, 252))
+    compare("stat_annual_vol", con.execute(f"SELECT stat_annual_vol({rs}, 252) AS v").fetchnumpy()["v"][0], ref_annual_vol(returns, 252))
 
     # 双变量统计
-    compare("stat_cov", con.execute(f"SELECT stat_cov({xs}, {ys})").fetchone()[0], ref_cov(x, y))
-    compare("stat_corr", con.execute(f"SELECT stat_corr({xs}, {ys})").fetchone()[0], ref_corr(x, y))
-    compare("stat_beta", con.execute(f"SELECT stat_beta({ys}, {xs})").fetchone()[0], ref_beta(y, x))
+    compare("stat_cov", con.execute(f"SELECT stat_cov({xs}, {ys}) AS v").fetchnumpy()["v"][0], ref_cov(x, y))
+    compare("stat_corr", con.execute(f"SELECT stat_corr({xs}, {ys}) AS v").fetchnumpy()["v"][0], ref_corr(x, y))
+    compare("stat_beta", con.execute(f"SELECT stat_beta({ys}, {xs}) AS v").fetchnumpy()["v"][0], ref_beta(y, x))
 
-    # 回归
+    # 回归（一次查询取回 4 个字段，fetchnumpy 列式）
     ref = ref_regress(y, x)
-    row = con.execute(f"SELECT stat_regress({ys}, {xs}).slope, stat_regress({ys}, {xs}).intercept, "
-                      f"stat_regress({ys}, {xs}).r2, stat_regress({ys}, {xs}).std_err").fetchone()
-    compare("stat_regress.slope", row[0], ref["slope"], 1e-6)
-    compare("stat_regress.intercept", row[1], ref["intercept"], 1e-6)
-    compare("stat_regress.r2", row[2], ref["r2"], 1e-6)
-    compare("stat_regress.std_err", row[3], ref["std_err"], 1e-6)
+    cols = con.execute(
+        f"SELECT stat_regress({ys}, {xs}).slope AS slope, "
+        f"stat_regress({ys}, {xs}).intercept AS intercept, "
+        f"stat_regress({ys}, {xs}).r2 AS r2, "
+        f"stat_regress({ys}, {xs}).std_err AS std_err"
+    ).fetchnumpy()
+    compare("stat_regress.slope", cols["slope"][0], ref["slope"], 1e-6)
+    compare("stat_regress.intercept", cols["intercept"][0], ref["intercept"], 1e-6)
+    compare("stat_regress.r2", cols["r2"][0], ref["r2"], 1e-6)
+    compare("stat_regress.std_err", cols["std_err"][0], ref["std_err"], 1e-6)
 
 
 # --------------------------------------------------------------------------- #
@@ -207,10 +211,10 @@ def test_performance(con, n: int) -> None:
         return statistics.mean(ts), min(ts)
 
     cases = [
-        ("stat_var", lambda: con.execute("SELECT stat_var(list(x)) FROM bench_data").fetchone(), lambda: ref_var(x)),
-        ("stat_stddev", lambda: con.execute("SELECT stat_stddev(list(x)) FROM bench_data").fetchone(), lambda: ref_stddev(x)),
-        ("stat_corr", lambda: con.execute("SELECT stat_corr(list(x), list(y)) FROM bench_data").fetchone(), lambda: ref_corr(x, y)),
-        ("stat_regress", lambda: con.execute("SELECT stat_regress(list(y), list(x)) FROM bench_data").fetchone(), lambda: ref_regress(y, x)),
+        ("stat_var", lambda: con.execute("SELECT stat_var(list(x)) AS v FROM bench_data").fetchnumpy()["v"], lambda: ref_var(x)),
+        ("stat_stddev", lambda: con.execute("SELECT stat_stddev(list(x)) AS v FROM bench_data").fetchnumpy()["v"], lambda: ref_stddev(x)),
+        ("stat_corr", lambda: con.execute("SELECT stat_corr(list(x), list(y)) AS v FROM bench_data").fetchnumpy()["v"], lambda: ref_corr(x, y)),
+        ("stat_regress", lambda: con.execute("SELECT stat_regress(list(y), list(x)) AS v FROM bench_data").fetchnumpy()["v"], lambda: ref_regress(y, x)),
     ]
 
     print(f"  {'函数':18s} {'扩展(ms)':>12s} {'numpy(ms)':>12s} {'扩展/numpy':>10s}")
