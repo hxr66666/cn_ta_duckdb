@@ -357,7 +357,134 @@ SELECT stat_pca(CAST([[1.0,2.0,3.0],[2.0,4.0,6.0]] AS DOUBLE[][])).eigenvalues;
 -- GARCH 条件波动率 / 趋势强度
 SELECT stat_garch_vol(list(close ORDER BY ts), 252, 0.1, 0.85),
        stat_trend_strength(list(close ORDER BY ts)) FROM ohlc;
+
+-- 卡尔曼平滑去噪（返回等长序列；q=过程噪声，r=观测噪声，r 越大越平滑）
+SELECT stat_kalman(list(close ORDER BY ts), 0.01, 1.0) FROM ohlc;
+
+-- 重采样 + z-score 归一化：任意长度 → 固定 n 点形状向量（均值≈0、标准差≈1），
+-- 过滤 NaN、消除价格量纲，可直接 CAST 成 FLOAT[n] 喂给向量库
+SELECT stat_resample(list(close ORDER BY ts), 128) FROM ohlc;
+
+-- DTW 形态匹配 + 滞后检测：distance 越小越相似，lag > 0 表示 b 滞后于 a（a 领先 b lag 根）
+SELECT stat_dtw(list(a.close ORDER BY ts), list(b.close ORDER BY ts), 5)
+FROM pair_ab;
 ```
+
+### 形态匹配与领先-滞后检测（stat_* + vss）
+
+找「形态相同但时间错位」的股票配对（产业链传导、资金轮动信号）：
+**两级流水线**——vss 向量库余弦粗筛砍掉 99% 候选，再对 Top-K 做 DTW 精算。
+DTW 是 O(N²)，只能当精算器；粗筛把它砍成 O(N·k)。
+
+#### 第 1 步：形状向量入库
+
+> `minute_bars` 为多股票分钟 K 表（`symbol, ts, close` 等列），可按日 K 或分钟 K 直接使用。
+
+```sql
+-- 卡尔曼平滑（去噪，保留趋势骨架）→ z-score 归一化 + 重采样到 128 点
+CREATE TABLE shape_vectors AS
+SELECT symbol,
+       stat_resample(stat_kalman(list(close ORDER BY ts), 0.01, 0.1), 128) AS shape,             -- LIST<DOUBLE>，供 DTW 精算
+       CAST(stat_resample(stat_kalman(list(close ORDER BY ts), 0.01, 0.1), 128) AS FLOAT[128]) AS vec  -- 供 vss 粗筛
+FROM minute_bars
+GROUP BY symbol;
+```
+
+> 平滑参数：做形态匹配时 R 取 0.05~0.1（比做指标更大），只要趋势骨架不要日内细节；
+> 窗口 60~120 根为宜，太短噪声大、太长形态被平均掉。
+
+#### 第 2 步：vss 粗筛（Top-K 候选）
+
+```sql
+INSTALL vss;
+LOAD vss;
+CREATE INDEX shape_vec_idx ON shape_vectors USING HNSW (vec) WITH (metric = 'cosine');
+
+-- 以 601919 的形状向量为 query，找全市场形态最相似的 5 只
+-- （ORDER BY array_cosine_distance + LIMIT 模式会被 HNSW 索引加速）
+SELECT s.symbol, round(array_cosine_distance(s.vec, q.vec), 4) AS cos_dist
+FROM shape_vectors s,
+     (SELECT vec FROM shape_vectors WHERE symbol = '601919') q
+WHERE s.symbol != '601919'
+ORDER BY cos_dist
+LIMIT 5;
+```
+
+```text
+┌─────────┬──────────┐
+│ symbol  │ cos_dist │
+│ varchar │  double  │
+├─────────┼──────────┤
+│ 601857  │   0.5503 │
+│ 600660  │   0.6667 │
+│ 600111  │   0.6916 │
+│ 600028  │   0.7086 │
+│ 002594  │   0.7342 │
+└─────────┴──────────┘
+```
+
+小表备选：暴力 lateral join 宏（不依赖 HNSW 索引）：
+
+```sql
+SELECT unnest.row.symbol, unnest.score
+FROM shape_vectors q,
+     vss_match(shape_vectors, q.vec, vec, 5) m,
+     unnest(m.matches)
+WHERE q.symbol = '601919';
+```
+
+#### 第 3 步：stat_dtw 精算（滞后天数 + 形态相似度）
+
+```sql
+WITH q AS (SELECT shape FROM shape_vectors WHERE symbol = '601919'),
+     topk AS (
+        SELECT s2.symbol AS symbol
+        FROM shape_vectors s2,
+             (SELECT vec FROM shape_vectors WHERE symbol = '601919') qv
+        WHERE s2.symbol != '601919'
+        ORDER BY array_cosine_distance(s2.vec, qv.vec)
+        LIMIT 5)
+SELECT s.symbol AS lagger,
+       round(stat_dtw(q.shape, s.shape, 10).similarity, 4) AS sim,
+       stat_dtw(q.shape, s.shape, 10).lag AS lag
+FROM q, topk, shape_vectors s
+WHERE s.symbol = topk.symbol
+ORDER BY sim DESC;
+```
+
+**lag 符号约定**：`lag > 0` 表示 `b`（候选股）滞后于 `a`（query 股），即 **a 领先 b lag 根**；`lag < 0` 表示 b 领先 a。例如 601919 与 002594 的配对返回 `lag = 7.0`，表示 601919 领先 002594 约 7 根。
+
+#### 验证：已知滞后样本精确还原
+
+构造一个形态**提前 7 根**出现的版本（b = 601919 去掉最前 7 根，同一段形态更早到达），`stat_dtw` 应还原 `lag = -7.0`（`lag < 0` = b 领先 a）；反向构造（b 前插 7 根）会得到 `lag = +7.0`（`lag > 0` = b 滞后 a）。
+
+```sql
+WITH shifted AS (
+    SELECT close, row_number() OVER (ORDER BY ts) AS rn
+    FROM minute_bars WHERE symbol = '601919'
+),
+a AS (SELECT list(close ORDER BY rn) AS l FROM shifted WHERE rn <= 1956),
+b AS (SELECT list(close ORDER BY rn) AS l FROM shifted WHERE rn > 7)
+SELECT stat_dtw(a.l, b.l, 15).lag AS lag,
+       round(stat_dtw(a.l, b.l, 15).similarity, 4) AS sim
+FROM a, b;
+```
+
+```text
+┌────────┬─────────┐
+│  lag   │   sim   │
+│ double │ double  │
+├────────┼─────────┤
+│   -7.0 │     1.0 │
+└────────┴─────────┘
+```
+
+#### 实战注意
+
+- **滞后方向要谨慎**：DTW 弹性匹配可能双向都算出低距离，务必保留 lag 符号；`|lag| < 3` 多半是噪声，建议只信 `|lag| >= 3` 的配对。
+- **防过度平滑**：卡尔曼 R 调太大所有股票曲线趋同（余弦全 0.9+）。健康状态下随机两只股票的余弦相似度应在 0.3~0.6。
+- **HNSW 索引默认只在内存库可用**；持久化需 `SET hnsw_enable_experimental_persistence = true`（实验性，崩溃可能损坏索引，生产慎用）。
+- **vss 只支持 `FLOAT[N]` 数组列**；索引建在数据灌完后再建（bulk load 并行度更高）。
 
 ### 滚动统计（窗口版，支持 OVER）
 

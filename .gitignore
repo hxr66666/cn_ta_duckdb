@@ -13,3 +13,5 @@ __pycache__
 *.pyc
 .cache
 duckdb_unittest_tempdir
+.extensions
+.reasonix

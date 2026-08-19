@@ -205,3 +205,110 @@ NULL
 0.5
 0.5
 0.5
+
+# ------------------------------------------------------------------
+# 12. 卡尔曼平滑 stat_kalman
+# ------------------------------------------------------------------
+# 单调序列 [1,2,3,4,5] 平滑后仍单调递增且去噪（首值=初始观测 1.0）
+query T
+SELECT cast(round(stat_kalman(list_value(1.0,2.0,3.0,4.0,5.0), 0.01, 1.0)[1], 4) AS VARCHAR) || ',' ||
+       cast(round(stat_kalman(list_value(1.0,2.0,3.0,4.0,5.0), 0.01, 1.0)[3], 4) AS VARCHAR) || ',' ||
+       cast(round(stat_kalman(list_value(1.0,2.0,3.0,4.0,5.0), 0.01, 1.0)[5], 4) AS VARCHAR)
+----
+1.0,2.0099,3.0487
+
+# 输出长度等于输入长度
+query I
+SELECT len(stat_kalman(list_value(1.0,2.0,3.0,4.0,5.0), 0.01, 1.0))
+----
+5
+
+# ------------------------------------------------------------------
+# 13. DTW 形态匹配 stat_dtw
+# ------------------------------------------------------------------
+# 相同序列: distance=0, lag=0, similarity=1
+query T
+SELECT cast(round(stat_dtw(list_value(1.0,2.0,3.0,4.0), list_value(1.0,2.0,3.0,4.0), 0).distance, 4) AS VARCHAR) || ',' ||
+       cast(round(stat_dtw(list_value(1.0,2.0,3.0,4.0), list_value(1.0,2.0,3.0,4.0), 0).lag, 4) AS VARCHAR) || ',' ||
+       cast(round(stat_dtw(list_value(1.0,2.0,3.0,4.0), list_value(1.0,2.0,3.0,4.0), 0).similarity, 4) AS VARCHAR)
+----
+0.0,0.0,1.0
+
+# 滞后检测: b 落后 a 1 天 -> lag=1, distance=0
+query T
+SELECT cast(round(stat_dtw(list_value(1.0,2.0,3.0,4.0), list_value(1.0,1.0,2.0,3.0,4.0), 0).lag, 4) AS VARCHAR) || ',' ||
+       cast(round(stat_dtw(list_value(1.0,2.0,3.0,4.0), list_value(1.0,1.0,2.0,3.0,4.0), 0).distance, 4) AS VARCHAR)
+----
+1.0,0.0
+
+# 滞后检测反向: a 落后 b 1 天 -> lag=-1
+query T
+SELECT cast(round(stat_dtw(list_value(1.0,1.0,2.0,3.0,4.0), list_value(1.0,2.0,3.0,4.0), 0).lag, 4) AS VARCHAR)
+----
+-1.0
+
+# ------------------------------------------------------------------
+# 14. 重采样 + z-score 归一化 stat_resample
+# ------------------------------------------------------------------
+# 输出长度 == n
+query I
+SELECT len(stat_resample(list_value(100.0,101.0,102.0,103.0,104.0,105.0), 5))
+----
+5
+
+# [100..105] 归一化后线性插值到 5 点（总体标准差 ÷N）
+query T
+SELECT cast(round(stat_resample(list_value(100.0,101.0,102.0,103.0,104.0,105.0), 5)[1], 4) AS VARCHAR) || ',' ||
+       cast(round(stat_resample(list_value(100.0,101.0,102.0,103.0,104.0,105.0), 5)[2], 4) AS VARCHAR) || ',' ||
+       cast(round(stat_resample(list_value(100.0,101.0,102.0,103.0,104.0,105.0), 5)[3], 4) AS VARCHAR) || ',' ||
+       cast(round(stat_resample(list_value(100.0,101.0,102.0,103.0,104.0,105.0), 5)[4], 4) AS VARCHAR) || ',' ||
+       cast(round(stat_resample(list_value(100.0,101.0,102.0,103.0,104.0,105.0), 5)[5], 4) AS VARCHAR)
+----
+-1.4639,-0.7319,0.0,0.7319,1.4639
+
+# 插值后均值≈0、stddev≈1（容差断言：插值会略微改变分布；abs 消除浮点负零）
+query T
+SELECT cast(round(abs(list_avg(stat_resample(list_value(100.0,101.0,102.0,103.0,104.0,105.0), 5))), 6) AS VARCHAR) || ',' ||
+       cast(round(list_stddev_pop(stat_resample(list_value(100.0,101.0,102.0,103.0,104.0,105.0), 5)), 1) AS VARCHAR)
+----
+0.0,1.0
+
+# n == 有效点数: 归一化后原样返回（无插值），均值严格=0、stddev 严格=1
+query T
+SELECT cast(round(stat_resample(list_value(100.0,101.0,102.0,103.0,104.0,105.0), 6)[1], 4) AS VARCHAR) || ',' ||
+       cast(round(stat_resample(list_value(100.0,101.0,102.0,103.0,104.0,105.0), 6)[2], 4) AS VARCHAR) || ',' ||
+       cast(round(stat_resample(list_value(100.0,101.0,102.0,103.0,104.0,105.0), 6)[3], 4) AS VARCHAR) || ',' ||
+       cast(round(stat_resample(list_value(100.0,101.0,102.0,103.0,104.0,105.0), 6)[6], 4) AS VARCHAR)
+----
+-1.4639,-0.8783,-0.2928,1.4639
+
+# 不同价位相同形态: z-score 消除量纲，[100..105] 与 [1000..1050] 归一化结果一致
+query T
+SELECT cast(round(stat_resample(list_value(100.0,101.0,102.0,103.0,104.0,105.0), 4)[1], 3) AS VARCHAR) || ',' ||
+       cast(round(stat_resample(list_value(1000.0,1010.0,1020.0,1030.0,1040.0,1050.0), 4)[1], 3) AS VARCHAR)
+----
+-1.464,-1.464
+
+# 含 NULL 元素: 过滤后有效点 [1,2,3]，n==有效点数 原样归一化
+query T
+SELECT cast(round(stat_resample(list_value(1.0, NULL, 2.0, NULL, 3.0), 3)[1], 4) AS VARCHAR) || ',' ||
+       cast(round(stat_resample(list_value(1.0, NULL, 2.0, NULL, 3.0), 3)[2], 4) AS VARCHAR) || ',' ||
+       cast(round(stat_resample(list_value(1.0, NULL, 2.0, NULL, 3.0), 3)[3], 4) AS VARCHAR)
+----
+-1.2247,0.0,1.2247
+
+# VSS 核心用例: 输出可直接 CAST 成 FLOAT[5]
+query I
+SELECT len(CAST(stat_resample(list_value(100.0,101.0,102.0,103.0,104.0,105.0), 5) AS FLOAT[5]))
+----
+5
+
+# 边界 -> NULL: 常数序列 / n<2 / 单点 / 空序列 / n 为 NULL（coalesce 使 NULL 显示为 'NULL' 文本）
+query T
+SELECT coalesce(cast(stat_resample(list_value(5.0,5.0,5.0), 3) AS VARCHAR), 'NULL') || ',' ||
+       coalesce(cast(stat_resample(list_value(1.0,2.0,3.0), 1) AS VARCHAR), 'NULL') || ',' ||
+       coalesce(cast(stat_resample(list_value(7.0), 3) AS VARCHAR), 'NULL') || ',' ||
+       coalesce(cast(stat_resample(CAST([] AS DOUBLE[]), 3) AS VARCHAR), 'NULL') || ',' ||
+       coalesce(cast(stat_resample(list_value(1.0,2.0,3.0), NULL) AS VARCHAR), 'NULL')
+----
+NULL,NULL,NULL,NULL,NULL

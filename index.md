@@ -161,6 +161,66 @@ Categories per [Wikipedia: Technical indicator](https://en.wikipedia.org/wiki/Te
 
 ---
 
+## Eigen Statistics & Shape Functions (stat_*)
+
+`stat_*` functions are an Eigen-backed statistics family operating on `LIST<DOUBLE>` inputs, returning scalars, `STRUCT`s, or lists. This section documents the sequence-shape trio used for lead-lag detection; see the [README](README.md#-eigen-金融统计与回归-stat_) for the full catalog.
+
+| Function | Signature | Return | Description |
+|----------|-----------|--------|-------------|
+| `stat_kalman(p, q, r)` | `(LIST, DOUBLE, DOUBLE)` | `LIST` | Kalman smoothing (scalar random-walk model). `q` = process noise (follow-through), `r` = observation noise (larger `r` = smoother). Returns a series of the same length; missing values (`NULL`) propagate the state. |
+| `stat_resample(p, n)` | `(LIST, INTEGER)` | `LIST` | Resample + z-score normalize to exactly `n` points via linear interpolation. `NaN`s are filtered first; normalization uses the **population** stddev (÷N), so price magnitude is removed and shapes across different price levels are directly comparable. Returns `NULL` when fewer than 2 valid points, `n < 2`, or the series is constant. Output has mean ≈ 0, stddev ≈ 1 — cast to `FLOAT[n]` for vector search. |
+| `stat_dtw(a, b, window)` | `(LIST, LIST, DOUBLE)` | `STRUCT(distance, lag, similarity)` | Banded DTW (Sakoe-Chiba) with lag detection. `distance` = normalized cumulative distance (lower = more similar), `similarity` = 0~1 (1 = identical). **`lag > 0` means `b` lags `a` (i.e. `a` leads `b` by `lag` steps); `lag < 0` means `b` leads `a`.** `window` = band width (<= 0 = unlimited). |
+
+### Lead-lag pipeline with the `vss` extension
+
+Combine the trio with DuckDB's [vss](https://duckdb.org/docs/current/core_extensions/vss) extension for a two-stage pipeline — cosine coarse filter (HNSW index, Top-K) followed by `stat_dtw` refinement:
+
+```sql
+INSTALL vss;
+LOAD vss;
+
+-- shape vectors: kalman smooth -> z-score normalize/resample to 128 points
+CREATE TABLE shape_vectors AS
+SELECT symbol,
+       stat_resample(stat_kalman(list(close ORDER BY ts), 0.01, 0.1), 128) AS shape,
+       CAST(stat_resample(stat_kalman(list(close ORDER BY ts), 0.01, 0.1), 128) AS FLOAT[128]) AS vec
+FROM minute_bars
+GROUP BY symbol;
+
+-- HNSW cosine index, then Top-K coarse filter (ORDER BY + LIMIT is index-accelerated)
+CREATE INDEX shape_vec_idx ON shape_vectors USING HNSW (vec) WITH (metric = 'cosine');
+SELECT s.symbol, array_cosine_distance(s.vec, q.vec) AS cos_dist
+FROM shape_vectors s,
+     (SELECT vec FROM shape_vectors WHERE symbol = '601919') q
+WHERE s.symbol != '601919'
+ORDER BY cos_dist
+LIMIT 5;
+
+-- DTW refinement over the Top-K candidates
+WITH q AS (SELECT shape FROM shape_vectors WHERE symbol = '601919'),
+     topk AS (
+        SELECT s2.symbol AS symbol
+        FROM shape_vectors s2,
+             (SELECT vec FROM shape_vectors WHERE symbol = '601919') qv
+        WHERE s2.symbol != '601919'
+        ORDER BY array_cosine_distance(s2.vec, qv.vec)
+        LIMIT 5)
+SELECT s.symbol AS lagger,
+       round(stat_dtw(q.shape, s.shape, 10).similarity, 4) AS sim,
+       stat_dtw(q.shape, s.shape, 10).lag AS lag
+FROM q, topk, shape_vectors s
+WHERE s.symbol = topk.symbol
+ORDER BY sim DESC;
+```
+
+Notes:
+
+- `vss` only supports `FLOAT[N]` array columns, and HNSW indexes are in-memory only unless `SET hnsw_enable_experimental_persistence = true` (experimental).
+- Trust only pairs with `|lag| >= 3` — 1-2 step "lags" are usually noise.
+- Worked end-to-end examples: see [cookbook.md](cookbook.md#形态匹配与领先-滞后检测stat_-vss).
+
+---
+
 ## Function Signatures
 
 | # | Function | Signature | Return |

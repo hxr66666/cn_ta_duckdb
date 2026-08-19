@@ -30,6 +30,20 @@ static inline double GetDoubleColumn(DataChunk &args, idx_t col, idx_t row, bool
 }
 
 // ============================================================
+// Helper: extract an INTEGER (int32_t) value at (row) of column (col)
+// 调用方必须在 is_valid == true 时才使用返回值
+// ============================================================
+static inline int GetIntColumn(DataChunk &args, idx_t col, idx_t row, bool &is_valid) {
+	auto &vec = args.data[col];
+	UnifiedVectorFormat vdata;
+	vec.ToUnifiedFormat(args.size(), vdata);
+	auto data = UnifiedVectorFormat::GetData<int32_t>(vdata);
+	auto idx = vdata.sel->get_index(row);
+	is_valid = vdata.validity.RowIsValid(idx);
+	return data[idx];
+}
+
+// ============================================================
 // Helper: extract a LIST<DOUBLE> at (row) into std::vector<double>
 // 复用 cn_ta_adapter.hpp 的 ListToDoubleArray 完成解包 + NULL→NaN 处理
 // ============================================================
@@ -1076,6 +1090,146 @@ static double StatTrendStrength(const std::vector<double> &prices) {
 }
 
 // ============================================================
+// 卡尔曼平滑：标量随机游走状态模型（1D）
+// 状态 x_t = x_{t-1} + w,  观测 z_t = x_t + v
+//   w ~ N(0, q)  过程噪声（越大越跟随即时波动）
+//   v ~ N(0, r)  观测噪声（越大平滑越强、去噪越彻底）
+// 输入: (LIST<DOUBLE> series, DOUBLE q, DOUBLE r)
+// 返回: LIST<DOUBLE> 平滑后的序列（与输入等长，前部用第一个观测初始化）
+// ============================================================
+static std::vector<double> StatKalmanSmooth(const std::vector<double> &series, double q, double r) {
+	std::vector<double> out;
+	out.reserve(series.size());
+	if (series.empty() || r <= 0.0 || q < 0.0)
+		return out;
+
+	double x = series[0]; // 状态估计初值 = 首个观测
+	double p = 1.0;       // 估计协方差初值
+	bool first_valid = false;
+
+	for (double z : series) {
+		if (std::isnan(z)) {
+			// 缺失观测：只传播状态（预测步），输出当前状态
+			out.push_back(first_valid ? x : std::numeric_limits<double>::quiet_NaN());
+			continue;
+		}
+		if (!first_valid) {
+			x = z;
+			p = 1.0;
+			first_valid = true;
+			out.push_back(x);
+			continue;
+		}
+		// 预测（随机游走：状态不变，协方差 + q）
+		double p_pred = p + q;
+		// 更新（卡尔曼增益）
+		double k = p_pred / (p_pred + r);
+		x = x + k * (z - x);
+		p = (1.0 - k) * p_pred;
+		out.push_back(x);
+	}
+	return out;
+}
+
+// ============================================================
+// DTW（动态时间规整）+ 滞后偏移检测
+// 输入: (LIST<DOUBLE> a, LIST<DOUBLE> b, INTEGER window)
+//   a, b 为两段形态序列（建议已归一化）
+//   window 为 Sakoe-Chiba 带宽（|i-j| <= window），<=0 表示无带宽限制
+// 返回: STRUCT{distance DOUBLE, lag DOUBLE, similarity DOUBLE}
+//   distance:   DTW 累积距离（越小越相似）
+//   lag:        最优滞后（回溯路径匹配点对偏移 j-i 的中位数，正= b 滞后于 a）
+//   similarity: 归一化相似度 0~1（1 = 完全相同）
+// ============================================================
+struct DtwResult {
+	double distance = std::numeric_limits<double>::quiet_NaN();
+	double lag = 0.0;
+	double similarity = 0.0;
+};
+
+static DtwResult StatDtw(const std::vector<double> &a, const std::vector<double> &b, int window) {
+	DtwResult res;
+	if (a.empty() || b.empty()) {
+		return res;
+	}
+	idx_t n = a.size();
+	idx_t m = b.size();
+
+	// 去除 NaN：价格序列中的缺失值直接跳过（保留有效点）
+	std::vector<double> va, vb;
+	va.reserve(n);
+	vb.reserve(m);
+	for (double x : a) {
+		if (!std::isnan(x))
+			va.push_back(x);
+	}
+	for (double x : b) {
+		if (!std::isnan(x))
+			vb.push_back(x);
+	}
+	if (va.empty() || vb.empty()) {
+		return res;
+	}
+	n = va.size();
+	m = vb.size();
+
+	// 累积距离矩阵（n+1 x m+1），下标 1..n / 1..m 对应序列
+	std::vector<std::vector<double>> D(n + 1, std::vector<double>(m + 1, std::numeric_limits<double>::infinity()));
+	D[0][0] = 0.0;
+	for (idx_t i = 1; i <= n; i++)
+		D[i][0] = std::numeric_limits<double>::infinity();
+	for (idx_t j = 1; j <= m; j++)
+		D[0][j] = std::numeric_limits<double>::infinity();
+
+	int w = window > 0 ? window : (int)std::max(n, m);
+
+	for (idx_t i = 1; i <= n; i++) {
+		// Sakoe-Chiba 带宽限制搜索范围
+		int j_lo = std::max(1, (int)i - w);
+		int j_hi = std::min((int)m, (int)i + w);
+		for (int jj = j_lo; jj <= j_hi; jj++) {
+			idx_t j = (idx_t)jj;
+			double cost = std::abs(va[i - 1] - vb[j - 1]);
+			double prev = std::min({D[i - 1][j], D[i][j - 1], D[i - 1][j - 1]});
+			D[i][j] = cost + prev;
+		}
+	}
+
+	res.distance = D[n][m];
+
+	// 回溯最优路径，统计匹配点对偏移 (j - i)，取中位数作为最优滞后
+	std::vector<int> offsets;
+	idx_t i = n, j = m;
+	while (i > 0 && j > 0) {
+		offsets.push_back((int)j - (int)i);
+		double cur = D[i][j];
+		double diag = D[i - 1][j - 1];
+		double up = D[i - 1][j];
+		double left = D[i][j - 1];
+		if (diag <= up && diag <= left) {
+			i--;
+			j--;
+		} else if (up <= left) {
+			i--;
+		} else {
+			j--;
+		}
+	}
+	if (!offsets.empty()) {
+		std::sort(offsets.begin(), offsets.end());
+		res.lag = (double)offsets[offsets.size() / 2];
+	}
+
+	// 相似度归一化：distance 相对路径长度的平均单位距离
+	double path_len = (double)(n + m);
+	if (path_len > 0.0) {
+		double avg_dist = res.distance / path_len;
+		res.similarity = 1.0 / (1.0 + avg_dist);
+	}
+	return res;
+}
+
+// ============================================================
 // Scalar wrappers
 // ============================================================
 static void GarchVolFunc(DataChunk &args, ExpressionState &, Vector &result) {
@@ -1173,6 +1327,187 @@ static void TrendStrengthFunc(DataChunk &args, ExpressionState &, Vector &result
 }
 
 // ============================================================
+// 卡尔曼平滑 wrapper：LIST<DOUBLE> -> LIST<DOUBLE>
+// ============================================================
+static void KalmanFunc(DataChunk &args, ExpressionState &, Vector &result) {
+	auto count = args.size();
+	auto list_data = FlatVector::GetData<list_entry_t>(result);
+	auto &child = ListVector::GetEntry(result);
+
+	for (idx_t i = 0; i < count; i++) {
+		std::vector<double> series;
+		if (!GetListColumn(args, 0, i, series)) {
+			FlatVector::Validity(result).SetInvalid(i);
+			continue;
+		}
+		double q = 0.01, r = 1.0;
+		if (args.ColumnCount() > 1) {
+			bool ok = false;
+			q = GetDoubleColumn(args, 1, i, ok);
+		}
+		if (args.ColumnCount() > 2) {
+			bool ok = false;
+			r = GetDoubleColumn(args, 2, i, ok);
+		}
+		std::vector<double> smoothed = StatKalmanSmooth(series, q, r);
+		if (smoothed.empty()) {
+			FlatVector::Validity(result).SetInvalid(i);
+			continue;
+		}
+		// 写 LIST 结果
+		auto offset = ListVector::GetListSize(result);
+		list_data[i].offset = offset;
+		list_data[i].length = smoothed.size();
+		ListVector::Reserve(result, offset + smoothed.size());
+		ListVector::SetListSize(result, offset + smoothed.size());
+		auto child_data = FlatVector::GetData<double>(child);
+		auto &child_validity = FlatVector::Validity(child);
+		for (size_t k = 0; k < smoothed.size(); k++) {
+			if (std::isnan(smoothed[k])) {
+				child_validity.SetInvalid(offset + k);
+			} else {
+				child_data[offset + k] = smoothed[k];
+			}
+		}
+	}
+}
+
+// ============================================================
+// DTW wrapper：(LIST<DOUBLE>, LIST<DOUBLE>, INTEGER) -> STRUCT{distance, lag, similarity}
+// ============================================================
+static void DtwFunc(DataChunk &args, ExpressionState &, Vector &result) {
+	auto count = args.size();
+	auto &entries = StructVector::GetEntries(result);
+	auto &dist_v = *entries[0];
+	auto &lag_v = *entries[1];
+	auto &sim_v = *entries[2];
+
+	for (idx_t i = 0; i < count; i++) {
+		std::vector<double> a, b;
+		if (!GetListColumn(args, 0, i, a) || !GetListColumn(args, 1, i, b)) {
+			FlatVector::Validity(result).SetInvalid(i);
+			continue;
+		}
+		int window = 0;
+		if (args.ColumnCount() > 2) {
+			bool ok = false;
+			window = (int)GetDoubleColumn(args, 2, i, ok);
+		}
+		DtwResult r = StatDtw(a, b, window);
+		if (std::isnan(r.distance)) {
+			FlatVector::Validity(result).SetInvalid(i);
+			continue;
+		}
+		FlatVector::GetData<double>(dist_v)[i] = r.distance;
+		FlatVector::GetData<double>(lag_v)[i] = r.lag;
+		FlatVector::GetData<double>(sim_v)[i] = r.similarity;
+	}
+}
+
+// ============================================================
+// 重采样 + z-score 归一化（线性插值）
+// 过滤 NaN 后按总体标准差归一化（消除价格量纲，不同价位的股票可直接比形态），
+// 再线性插值到固定 n 点；有效点 < 2 / n < 2 / 常数序列返回空（wrapper 置 NULL）。
+// 特判：n == 有效点数时免插值直接返回（避免插值浮点噪音）。
+// ============================================================
+static std::vector<double> StatResample(const std::vector<double> &series, int n) {
+	std::vector<double> out;
+	if (n < 2) {
+		return out;
+	}
+
+	std::vector<double> valid;
+	valid.reserve(series.size());
+	for (double x : series) {
+		if (!std::isnan(x)) {
+			valid.push_back(x);
+		}
+	}
+	if (valid.size() < 2) {
+		return out;
+	}
+
+	// z-score 归一化
+	double mean = 0.0;
+	for (double x : valid) {
+		mean += x;
+	}
+	mean /= (double)valid.size();
+	double var = 0.0;
+	for (double x : valid) {
+		double d = x - mean;
+		var += d * d;
+	}
+	var /= (double)valid.size();
+	if (var == 0.0) {
+		return out;
+	}
+	double stddev = std::sqrt(var);
+
+	std::vector<double> norm;
+	norm.reserve(valid.size());
+	for (double x : valid) {
+		norm.push_back((x - mean) / stddev);
+	}
+
+	// n == 有效点数：免插值直接返回
+	if (norm.size() == (size_t)n) {
+		return norm;
+	}
+
+	// 线性插值
+	out.reserve((size_t)n);
+	double m = (double)norm.size();
+	for (int k = 0; k < n; k++) {
+		double pos = (double)k * (m - 1.0) / (double)(n - 1);
+		idx_t lo = (idx_t)std::floor(pos);
+		idx_t hi = std::min(lo + 1, (idx_t)m - 1);
+		double frac = pos - (double)lo;
+		out.push_back(norm[lo] * (1.0 - frac) + norm[hi] * frac);
+	}
+	return out;
+}
+
+// ============================================================
+// 重采样 wrapper：(LIST<DOUBLE>, INTEGER) -> LIST<DOUBLE>
+// n 为 NULL 或无效时整行置 NULL
+// ============================================================
+static void ResampleFunc(DataChunk &args, ExpressionState &, Vector &result) {
+	auto count = args.size();
+	auto list_data = FlatVector::GetData<list_entry_t>(result);
+	auto &child = ListVector::GetEntry(result);
+
+	for (idx_t i = 0; i < count; i++) {
+		std::vector<double> series;
+		if (!GetListColumn(args, 0, i, series)) {
+			FlatVector::Validity(result).SetInvalid(i);
+			continue;
+		}
+		bool n_ok = false;
+		int n = GetIntColumn(args, 1, i, n_ok);
+		if (!n_ok) {
+			FlatVector::Validity(result).SetInvalid(i);
+			continue;
+		}
+		std::vector<double> resampled = StatResample(series, n);
+		if (resampled.empty()) {
+			FlatVector::Validity(result).SetInvalid(i);
+			continue;
+		}
+		// 写 LIST 结果
+		auto offset = ListVector::GetListSize(result);
+		list_data[i].offset = offset;
+		list_data[i].length = resampled.size();
+		ListVector::Reserve(result, offset + resampled.size());
+		ListVector::SetListSize(result, offset + resampled.size());
+		auto child_data = FlatVector::GetData<double>(child);
+		for (size_t k = 0; k < resampled.size(); k++) {
+			child_data[offset + k] = resampled[k];
+		}
+	}
+}
+
+// ============================================================
 // Registration
 // ============================================================
 void RegisterCnTaStatFunctions(ExtensionLoader &loader) {
@@ -1247,6 +1582,23 @@ void RegisterCnTaStatFunctions(ExtensionLoader &loader) {
 	    ScalarFunction("stat_rsi", {LIST_DOUBLE, LogicalType::DOUBLE}, LogicalType::DOUBLE, RSIFunc));
 	loader.RegisterFunction(
 	    ScalarFunction("stat_trend_strength", {LIST_DOUBLE}, LogicalType::DOUBLE, TrendStrengthFunc));
+
+	// 卡尔曼平滑: (LIST<DOUBLE>, DOUBLE q, DOUBLE r) -> LIST<DOUBLE>
+	loader.RegisterFunction(ScalarFunction("stat_kalman", {LIST_DOUBLE, LogicalType::DOUBLE, LogicalType::DOUBLE},
+	                                       LIST_DOUBLE, KalmanFunc));
+
+	// DTW + 滞后检测: (LIST<DOUBLE>, LIST<DOUBLE>, DOUBLE window) -> STRUCT{distance, lag, similarity}
+	child_list_t<LogicalType> dtw_fields;
+	dtw_fields.push_back({"distance", LogicalType::DOUBLE});
+	dtw_fields.push_back({"lag", LogicalType::DOUBLE});
+	dtw_fields.push_back({"similarity", LogicalType::DOUBLE});
+	LogicalType dtw_struct = LogicalType::STRUCT(std::move(dtw_fields));
+	loader.RegisterFunction(
+	    ScalarFunction("stat_dtw", {LIST_DOUBLE, LIST_DOUBLE, LogicalType::DOUBLE}, dtw_struct, DtwFunc));
+
+	// 重采样 + z-score 归一化: (LIST<DOUBLE>, INTEGER n) -> LIST<DOUBLE>
+	loader.RegisterFunction(
+	    ScalarFunction("stat_resample", {LIST_DOUBLE, LogicalType::INTEGER}, LIST_DOUBLE, ResampleFunc));
 }
 
 } // namespace duckdb

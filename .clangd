@@ -1,2 +1,8 @@
 CompileFlags:
   CompilationDatabase: .cache/clangd
+
+# duckdb / extension-ci-tools 是 git submodule，与本项目无关，屏蔽其诊断
+If:
+  PathMatch: [.*duckdb/.*, .*extension-ci-tools/.*]
+Diagnostics:
+  Suppress: ["*"]

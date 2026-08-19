@@ -159,6 +159,9 @@ FROM ohlc WHERE ticker = 'NVDA';
 | `stat_garch_vol(p, ppy, alpha, beta)` | `(LIST, DOUBLE, DOUBLE, DOUBLE) -> DOUBLE` | GARCH(1,1) 条件波动率。`SELECT stat_garch_vol(list(close), 252, 0.1, 0.85);` |
 | `stat_rsi(p, period)` | `(LIST, DOUBLE) -> DOUBLE` | RSI（Wilder 平滑），返回 0-100。`SELECT stat_rsi(list(close), 14);` |
 | `stat_trend_strength(p)` | `(LIST) -> DOUBLE` | 趋势强度 = 线性回归 R²（0~1）。`SELECT stat_trend_strength(list(close));` |
+| `stat_kalman(p, q, r)` | `(LIST, DOUBLE, DOUBLE) -> LIST` | 卡尔曼平滑去噪（标量随机游走模型），返回等长平滑序列。q=过程噪声（跟随性），r=观测噪声（平滑强度）。`SELECT stat_kalman(list(close), 0.01, 1.0);` |
+| `stat_dtw(a, b, window)` | `(LIST, LIST, DOUBLE) -> STRUCT{distance, lag, similarity}` | DTW 形态匹配 + 滞后偏移检测。distance=累积距离（越小越相似），lag=最优滞后天数（正=b 滞后 a），similarity=归一化相似度 0~1。window 为 Sakoe-Chiba 带宽（<=0 表示不限）。`SELECT stat_dtw(list(close_a), list(close_b), 5);` |
+| `stat_resample(p, n)` | `(LIST, INTEGER) -> LIST` | 重采样 + z-score 归一化（线性插值）。过滤 NaN 后按总体标准差归一化（消除价格量纲，不同价位的股票可直接比较形态），再线性插值到固定 n 个点，输出形态向量（均值≈0、标准差≈1），可直接 `CAST(... AS FLOAT[n])` 喂给 VSS。有效点 < 2、n < 2 或常数序列返回 NULL。`SELECT stat_resample(list(close), 128);` |
 
 ### 六、聚合/窗口版本（支持 OVER）
 
@@ -437,7 +440,7 @@ CMake 使用标准 `find_path`/`find_library` 查找 `talib` 和 `eigen3`。依�
 
 ```bash
 sudo apt install ta-lib-dev libeigen3-dev
-GEN=ninja make        # 构建
+.make        # 构建
 make test             # 运行测试
 ```
 
