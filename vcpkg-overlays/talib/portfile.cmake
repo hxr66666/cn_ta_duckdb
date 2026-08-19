@@ -2,7 +2,7 @@ vcpkg_from_github(
     OUT_SOURCE_PATH SOURCE_PATH
     REPO "TA-Lib/ta-lib"
     REF "v${VERSION}"
-    SHA512 c8b9daf922cc98119e96a5bdb54187669e2f26be53fded8c7056630496b1410848fca7d37ff895f1ce8d6449853174ce2b5d2b3153ddbdc854af69c9c8ea68c7
+    SHA512 189702beda83f9ebe16ef7d08d8bba76068a71b63409e2e00f1a5a4a06997037d54f048778323fcc6482fe1e5ce9125314b4d4b7a12dee5d64c5b0d3879fca45
     PATCHES
         fix-forced-install-prefix.patch
         no-system-cleanup.patch
