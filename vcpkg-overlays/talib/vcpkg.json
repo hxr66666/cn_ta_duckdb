@@ -4,7 +4,7 @@
   "description": "TA-Lib - Technical Analysis Library",
   "homepage": "https://ta-lib.github.io/",
   "license": "BSD-3-Clause",
-  "supports": "linux | osx | (windows & !uwp)",
+  "supports": "linux | osx",
   "dependencies": [
     {
       "name": "vcpkg-cmake",
