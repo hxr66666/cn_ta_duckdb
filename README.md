@@ -439,9 +439,9 @@ CMake 使用标准 `find_path`/`find_library` 查找 `talib` 和 `eigen3`。依�
 使用系统包（推荐，可靠）：
 
 ```bash
-sudo apt install ta-lib-dev libeigen3-dev
-.make        # 构建
-make test             # 运行测试
+sudo apt-get install -y ta-lib-dev libeigen3-dev ninja-build cmake git
+./scripts/build_linux.sh [release|debug]
+
 ```
 
 ### Windows（MSVC）
@@ -452,7 +452,7 @@ make test             # 运行测试
 $env:VCPKG_ROOT = "C:\vcpkg"
 $env:VCPKG_TOOLCHAIN_PATH = "$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake"
 # 依赖在 vcpkg.json 声明（talib + eigen3），构建时自动安装
-GEN=ninja make
+.\scripts\build_windows.ps1 [-BuildType release|debug]
 ```
 
 > Windows 下 CMake 会自动链接 talib 官方 port 的库（`ta_libc`/`ta_func`/`ta_abstract`/`ta_common`）。

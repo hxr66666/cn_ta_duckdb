@@ -89,7 +89,6 @@ if (-not $vcpkgRoot) {
 $cmakeArgs = @(
   "-S", (Join-Path $ProjDir "duckdb")
   "-B", $BuildDir
-  "-G", "Ninja"
   "-DCMAKE_BUILD_TYPE=$BuildType"
   "-DBUILD_UNITTESTS=0"
   "-DBUILD_SHELL=1"
