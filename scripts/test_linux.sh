@@ -47,6 +47,21 @@ fi
 
 # Configure a unittest build: main DuckDB library + extension statically linked,
 # so the unittest binary can exercise the extension's registered sqllogic tests.
+#
+# In CI the build runs inside the DuckDB docker image, which has no system
+# eigen3/ta-lib; when vcpkg is present (/vcpkg) enable it so the manifest
+# dependencies (eigen3 + talib overlay port) are installed. Locally (no /vcpkg)
+# the system-installed dependencies are used, as before.
+VCPKG_ARGS=()
+if [ -d "/vcpkg/scripts/buildsystems" ]; then
+    VCPKG_ARGS=(
+        -DVCPKG_BUILD=1
+        -DCMAKE_TOOLCHAIN_FILE="/vcpkg/scripts/buildsystems/vcpkg.cmake"
+        -DVCPKG_TARGET_TRIPLET="${VCPKG_TARGET_TRIPLET:-x64-linux-release}"
+        -DVCPKG_MANIFEST_DIR="$PROJ_DIR"
+    )
+fi
+
 echo ">> Configuring unittest build..."
 cmake -S "$PROJ_DIR/duckdb" \
   -B "$BUILD_DIR" \
@@ -57,7 +72,8 @@ cmake -S "$PROJ_DIR/duckdb" \
   -DBUILD_MAIN_DUCKDB_LIBRARY=1 \
   -DEXTENSION_STATIC_BUILD=1 \
   -DDUCKDB_EXTENSION_CONFIGS="$PROJ_DIR/extension_config.cmake" \
-  -DCMAKE_PREFIX_PATH="$PROJ_DIR/vcpkg_installed;$PROJ_DIR/vcpkg_installed/x64-linux"
+  -DCMAKE_PREFIX_PATH="$PROJ_DIR/vcpkg_installed;$PROJ_DIR/vcpkg_installed/x64-linux" \
+  "${VCPKG_ARGS[@]}"
 
 echo ">> Building unittest..."
 cmake --build "$BUILD_DIR" --target unittest
